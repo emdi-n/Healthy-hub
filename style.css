@@ -188,6 +188,7 @@ button:disabled { opacity: .4; cursor: default; }
 .row.is-done .row-name { color: var(--ink-soft); }
 .row-main { min-width: 0; }
 .row-name { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 2px 0; font-size: 1.02rem; font-weight: 550; }
+span.row-name { cursor: default; }
 .row-meta { display: flex; align-items: center; gap: 10px; font-size: .85rem; color: var(--ink-soft); }
 .dots { display: inline-flex; gap: 3px; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
@@ -244,7 +245,7 @@ button:disabled { opacity: .4; cursor: default; }
 .crit-big { width: 54px; height: 54px; border-radius: 50%; background: var(--cat); display: grid; place-items: center; font-size: 1.7rem; margin-bottom: 10px; }
 .tile h3 { margin-bottom: 2px; }
 .tile .small { margin-bottom: 8px; }
-.bloom { margin: 10px 0 0; font-size: .9rem; }
+.bloom { display: flex; justify-content: space-between; align-items: baseline; margin: 10px 0 0; font-size: .9rem; }
 .ms { list-style: none; margin: 0; padding: 0; }
 .ms li { display: flex; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); font-size: .92rem; color: var(--ink-soft); }
 .ms li:first-child { border-top: 0; }
@@ -299,7 +300,7 @@ textarea { resize: vertical; }
 /* ---------- bottom nav ---------- */
 #nav {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 10;
-  display: grid; grid-template-columns: repeat(5, 1fr);
+  display: grid; grid-template-columns: repeat(4, 1fr);
   max-width: 600px; margin: 0 auto;
   padding: 6px 6px max(8px, env(safe-area-inset-bottom));
   background: color-mix(in srgb, var(--card) 92%, transparent);
@@ -353,3 +354,39 @@ textarea { resize: vertical; }
   #app { padding-top: 32px; }
   #nav { bottom: 12px; border: 1px solid var(--line); border-radius: 26px; left: 50%; transform: translateX(-50%); width: 580px; }
 }
+
+
+/* ---------- water tree card ---------- */
+.water-card {
+  display: flex; align-items: center; gap: 16px; width: 100%; text-align: left;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+}
+.water-card:active { transform: scale(.99); }
+.tree { width: 62px; height: 76px; flex: none; }
+.tree-line { fill: none; stroke: var(--ink-soft); stroke-width: 2; opacity: .5; }
+.tree-fill { fill: var(--track); }
+.tree-water { fill: var(--e-water, #6fa8c9); transition: transform .6s ease; }
+:root { --e-water: #6fa8c9; }
+@media (prefers-color-scheme: dark) { :root { --e-water: #7fb8d9; } }
+.wc-text .big { font-size: 1.15rem; }
+
+/* ---------- level tag replacing the old dots ---------- */
+.lvl-tag {
+  font-size: .72rem; padding: 2px 8px; border-radius: 99px; white-space: nowrap;
+  background: var(--track); color: var(--ink-soft); border: 1px solid var(--line);
+}
+.lvl-tag.l3 { background: color-mix(in srgb, var(--cat, var(--primary)) 30%, var(--card)); color: var(--ink); }
+
+/* ---------- woodland level bar ---------- */
+.level-bar { margin-top: 14px; }
+
+/* ---------- settings: habits fold, cloud, errors ---------- */
+.err { color: #a2544a; font-size: .85rem; margin-top: 6px; }
+@media (prefers-color-scheme: dark) { .err { color: #e2a79e; } }
+.form h2 { margin-bottom: 12px; }
+.group { margin-bottom: 18px; }
+.group:last-child { margin-bottom: 4px; }
+em { font-style: normal; color: var(--primary); font-size: .78em; }
+
+/* details/summary used in Settings for the habits fold */
+#app > details.fold, .form + details.fold { margin-bottom: 14px; }
