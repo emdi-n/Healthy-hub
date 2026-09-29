@@ -204,6 +204,13 @@ function migrate(s) {
     oldBasic.name = 'Water';
   }
   s.days = s.days || {};
+  // Older saves had a fourth energy state ("red", low-but-not-resting) that no
+  // longer exists now there are only Good/Steady/Rest. Fold it into Steady so
+  // those days keep their logged habits and don't vanish or crash the lookup.
+  for (const date in s.days) {
+    const en = s.days[date].energy;
+    if (en && !CONFIG.energy[en]) s.days[date].energy = 'amber';
+  }
   s.milestones = s.milestones || {};
   s.startDate = s.startDate || f.startDate;
   s.metaAt = s.metaAt || 0;
@@ -278,7 +285,9 @@ function day(date, create) {
 }
 
 const waterTotal = d => ((d && d.waterHealth) || 0) + ((d && d.waterMl) || 0);
-const energyOf = date => (state.days[date] && state.days[date].energy) || 'amber';
+// Falls back to 'amber' for a missing day AND for any energy value that isn't
+// one of the three current states (belt-and-braces alongside the migrate() remap).
+const energyOf = date => { const en = state.days[date] && state.days[date].energy; return en && CONFIG.energy[en] ? en : 'amber'; };
 const goalFor = date => CONFIG.energy[energyOf(date)].goal;
 const dayXp = date => { const d = state.days[date]; return d ? Object.values(d.done).reduce((s, x) => s + x.xp, 0) : 0; };
 const goalMet = date => energyOf(date) !== 'rest' && dayXp(date) > 0 && dayXp(date) >= goalFor(date);
@@ -1034,7 +1043,7 @@ function viewCalendar() {
 }
 
 function dayDetail(date) {
-  const d = state.days[date] || {}, en = d.energy || null, cfg = CONFIG.energy[en || 'amber'], xp = dayXp(date);
+  const d = state.days[date] || {}, en = d.energy && CONFIG.energy[d.energy] ? d.energy : null, cfg = CONFIG.energy[en || 'amber'], xp = dayXp(date);
   const doneList = d.done ? Object.keys(d.done).map(id => ({ id, h: habitById(id), e: d.done[id] })).filter(x => x.h) : [];
   const pebbles = Object.entries(CONFIG.energy).map(([key, c]) =>
     `<button class="pebble small-pebble e-${key}${en === key ? ' on' : ''}" data-act="cal-energy" data-val="${key}"><i></i>${c.label}</button>`).join('');
