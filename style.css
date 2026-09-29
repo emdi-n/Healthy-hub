@@ -90,7 +90,7 @@ body {
 }
 
 h1, h2, h3 { font-family: var(--serif); font-weight: 600; line-height: 1.2; margin: 0; letter-spacing: 0.005em; }
-h1 { font-size: 1.9rem; }
+h1 { font-size: 1.6rem; }
 h2 { font-size: 1.2rem; margin-bottom: 8px; }
 h3 { font-size: 1.02rem; }
 p { margin: 0 0 8px; }
@@ -123,7 +123,7 @@ button:disabled { opacity: .4; cursor: default; }
 .date { font-family: var(--sans); font-size: .875rem; }
 .back { margin-bottom: 10px; }
 .log-btn { margin-top: 4px; }
-.q { font-size: 1.5rem; margin-bottom: 10px; }
+.q { font-size: 1.6rem; margin-bottom: 10px; }
 .pebbles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .pebble {
   --e: var(--e-green);
@@ -390,3 +390,58 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 
 /* details/summary used in Settings for the habits fold */
 #app > details.fold, .form + details.fold { margin-bottom: 14px; }
+
+/* ---------- three energy pebbles instead of four ---------- */
+.pebbles { grid-template-columns: repeat(3, 1fr); }
+.pebbles.small { grid-template-columns: repeat(3, 1fr); gap: 6px; margin: 10px 0; }
+.pebble.small-pebble { padding: 8px 4px; font-size: .72rem; border-radius: 14px 14px 14px 6px; }
+.pebble.small-pebble i { width: 12px; height: 12px; }
+
+/* ---------- auto-tracked section ---------- */
+.auto-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
+.auto-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 16px; background: var(--bg); }
+.auto-item.met { background: color-mix(in srgb, var(--primary) 14%, var(--bg)); }
+.ring-mini { width: 36px; height: 36px; flex: none; }
+.ring-mini .ring-bg { fill: none; stroke: var(--track); stroke-width: 4; }
+.ring-mini .ring-fg { fill: none; stroke: var(--primary); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset .4s; }
+.auto-name { font-size: .85rem; font-weight: 600; margin: 0; }
+
+/* ---------- buddy hero (Woodland) ---------- */
+.buddy-hero { text-align: center; }
+.buddy-emoji { width: 84px; height: 84px; margin: 0 auto 10px; border-radius: 50%; background: var(--cat, var(--primary)); display: grid; place-items: center; font-size: 2.6rem; }
+.buddy-hero h2 { margin-bottom: 2px; }
+.buddy-hero .bar { margin: 10px 0 6px; }
+.buddy-hero .btn-row { justify-content: center; margin-top: 12px; }
+
+/* ---------- starter picker ---------- */
+.starters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
+.starter-card { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 14px 6px; border-radius: 20px; background: color-mix(in srgb, var(--cat) 18%, var(--card)); border: 1.5px solid color-mix(in srgb, var(--cat) 45%, var(--line)); text-align: center; }
+.starter-card .buddy-emoji { width: 56px; height: 56px; font-size: 1.8rem; margin-bottom: 4px; }
+
+/* ---------- mystery boxes ---------- */
+.mystery-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 14px 0; }
+.mystery-box { aspect-ratio: 1; border-radius: 18px; border: 2px dashed var(--line); background: var(--bg); font-size: 2rem; color: var(--ink-soft); display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; }
+.mystery-box.open { border-style: solid; background: var(--card); font-size: 2rem; }
+.mystery-box.open.picked { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 16%, var(--card)); }
+
+/* ---------- woodland slots ---------- */
+.slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
+.slot { padding: 12px; border-radius: 18px; background: var(--card); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; font-size: .85rem; color: var(--ink-soft); }
+.slot.empty { align-items: center; justify-content: center; min-height: 70px; }
+.slot.is-buddy { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card)); }
+.slot-emoji { font-size: 1.4rem; }
+.slot-name { font-weight: 600; color: var(--ink); }
+.home-pick { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.home-pick:first-child { border-top: 0; }
+
+/* ---------- calendar day detail ---------- */
+.day-detail { margin-top: 14px; }
+.pencil { font-size: 1rem; }
+
+/* ---------- settings: unsorted quick-move, tiers, schedule ---------- */
+.unsorted-row { display: grid; grid-template-columns: 1fr auto auto; gap: 8px; align-items: center; padding: 10px 2px; border-top: 1px solid var(--line); }
+.group li:first-child .unsorted-row { border-top: 0; }
+.unsorted-row select { font-size: .85rem; padding: 6px 8px; }
+.day-picks { display: flex; flex-wrap: wrap; gap: 8px; }
+.daychk { display: flex; align-items: center; gap: 4px; font-size: .82rem; padding: 6px 10px; border-radius: 99px; border: 1px solid var(--line); }
+.daychk input { accent-color: var(--primary); }
