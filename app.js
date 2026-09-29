@@ -79,6 +79,7 @@ const DEFAULT_SETTINGS = {
   waterBase: 1500,   // ml
   avgHr: 75,         // your typical average heart rate, for the water calculation
   graceDays: 1,      // spare days that don't break a streak
+  plantGoal: 5,      // different plants/veg/fruit/nuts/seeds/grains you're aiming for today
   lat: null, lon: null,
 };
 
@@ -90,6 +91,7 @@ const TYPES = {
   stand:    'Standing hours (Apple Health)',
   sleep:    'Sleep hours (Apple Health)',
   water:    'Water (Apple Health + calculated)',
+  plants:   'Plant count (tap to add)',
 };
 
 // A helper that fills in the boring bits so the list below stays readable.
@@ -116,6 +118,7 @@ const DEFAULT_HABITS = [
   H('face', 'Wash face', 'body', { core: true, gentle: 'Face wipe' }),
   H('moist', 'Moisturise', 'body', { after: 'face' }),
   H('spf', 'SPF', 'body', { after: 'moist' }),
+  H('plants', 'Plant variety', 'body', { type: 'plants', xp: 15 }),
 
   // Movement
   H('steps', 'Step goal', 'move', { type: 'steps', level: 2, xp: 20 }),
@@ -390,6 +393,7 @@ function autoInfo(h, date) {
     case 'stand':    return { have: d.standHr || 0,      need: s.standGoal,    unit: 'hours' };
     case 'sleep':    return { have: d.sleepHr || 0,      need: s.sleepGoal,    unit: 'hours' };
     case 'water':    return { have: waterTotal(d),       need: waterPlan(date).target, unit: 'ml' };
+    case 'plants':   return { have: d.plants || 0,        need: s.plantGoal,    unit: 'plants' };
   }
   return null;
 }
@@ -760,6 +764,7 @@ const ui = {
   folds: {}, tab: 'today', date: todayStr(), openId: null, editId: null, sheet: null,
   calMonth: todayStr().slice(0, 7), calDetail: null, calEdit: false,
   tierIdx: {}, addMulti: false, swapPick: null,
+  selectMode: false, selected: new Set(),
 };
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -827,7 +832,8 @@ function viewToday() {
     </section>`;
 
   // Auto habits (steps, exercise, standing, sleep) get their own section with a small ring each
-  const autos = activeHabits().filter(h => h.type !== 'water' && autoInfo(h, date));
+  // (water and plants get their own cards instead, further down)
+  const autos = activeHabits().filter(h => h.type !== 'water' && h.type !== 'plants' && autoInfo(h, date));
   const autoSection = autos.length ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${autos.map(h => {
     const a = autoInfo(h, date), pct = a.need ? a.have / a.need : 0, met = a.have >= a.need && a.have > 0;
     return `<div class="auto-item${met ? ' met' : ''}">${miniRing(pct)}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${fmtAmount(a.have)} / ${fmtAmount(a.need)} ${a.unit}</p></div></div>`;
@@ -865,7 +871,7 @@ function viewToday() {
   const list = items => `<ul class="rows">${items.map(x => rowHtml(x.h, x.od, date)).join('')}</ul>`;
   const fold = (key, title, items) => items.length ? `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${title} <span class="count">${items.length}</span></summary>${list(items)}</details>` : '';
 
-  let body = waterCard(date) + autoSection;
+  let body = waterCard(date) + plantCard(date) + autoSection;
   if (shown.length) body += `<section class="panel"><h2>Suggested</h2>${list(shown)}</section>`;
   else if (!resting) body += `<section class="panel"><p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p></section>`;
   body += fold('more', 'More', more);
@@ -888,6 +894,27 @@ function waterCard(date) {
       <p class="small">${Math.round(pct * 100)}%${entry ? `, +${entry.xp} xp` : ''}</p>
     </div>
   </button>`;
+}
+
+// Plant variety: a simple tap counter. Taps beat a slider or a wheel here —
+// the number is always small (0–10ish) and a slow, fiddly control is the
+// last thing you want reaching for a snack. Each leaf is one plant so far.
+function plantCard(date) {
+  const h = activeHabits().find(x => x.type === 'plants');
+  if (!h) return '';
+  const d = state.days[date], have = (d && d.plants) || 0, goal = state.settings.plantGoal, entry = d && d.done[h.id];
+  const leaves = Array.from({ length: Math.max(goal, have) }, (_, i) => `<span class="leaf${i < have ? ' on' : ''}"></span>`).join('');
+  return `<section class="panel plant-card">
+    <div class="plant-head">
+      <p class="small">Plant variety</p>
+      <p class="big">${have} of ${goal}${entry ? `, +${entry.xp} xp` : ''}</p>
+    </div>
+    <div class="leaf-row" role="group" aria-label="Different plants today">${leaves}</div>
+    <div class="btn-row">
+      <button class="btn primary small" data-act="plant-add" data-n="1">+1 plant</button>
+      <button class="btn ghost small" data-act="plant-add" data-n="-1"${have ? '' : ' disabled'}>Undo one</button>
+    </div>
+  </section>`;
 }
 
 function rowHtml(h, od, date) {
@@ -1105,15 +1132,23 @@ function viewSettings() {
   const s = state.settings;
   const numField = (key, label, min, max, step) => field(label, `<input type="number" data-setting="${key}" min="${min}" max="${max}" step="${step || 1}" value="${s[key]}">`);
 
+  const selectMode = ui.selectMode;
+  const selDot = id => `<span class="sel-dot${ui.selected.has(id) ? ' on' : ''}"></span>`;
+
   const habitGroups = CATEGORIES.map(c => {
     const list = state.habits.filter(h => h.cat === c.id);
     if (!list.length) return '';
     const rows = list.map(h => c.id === 'unsorted'
-      ? `<li class="edit-row unsorted-row">
+      ? `<li class="edit-row unsorted-row${selectMode ? ' has-sel' : ''}">
+          ${selectMode ? `<button class="sel-btn" data-act="select-habit" data-id="${h.id}" aria-pressed="${ui.selected.has(h.id)}" aria-label="Select ${esc(h.name)}">${selDot(h.id)}</button>` : ''}
           <span class="er-name">${esc(h.name)}</span>
           <select data-act="quick-cat" data-id="${h.id}">${opt('', 'Move to…', '')}${CATEGORIES.filter(x => x.id !== 'unsorted').map(x => opt(x.id, esc(x.name), '')).join('')}</select>
           <button class="mini" data-act="edit" data-id="${h.id}" aria-label="Edit">✎</button>
         </li>`
+      : selectMode
+      ? `<li><button class="edit-row selectable${ui.selected.has(h.id) ? ' checked' : ''}" data-act="select-habit" data-id="${h.id}" aria-pressed="${ui.selected.has(h.id)}">
+          ${selDot(h.id)}<span class="dotcat"></span><span class="er-name">${esc(h.name)}${h.core ? ' <em>core</em>' : ''}</span>
+          <span class="er-meta">${h.type === 'check' ? freqText(h) : 'auto'}${h.paused ? ', paused' : ''}</span></button></li>`
       : `<li><button class="edit-row${h.paused ? ' paused' : ''}" data-act="edit" data-id="${h.id}">
           <span class="dotcat"></span><span class="er-name">${esc(h.name)}${h.core ? ' <em>core</em>' : ''}</span>
           <span class="er-meta">${h.type === 'check' ? freqText(h) : 'auto'}${h.paused ? ', paused' : ''}</span></button></li>`
@@ -1121,11 +1156,26 @@ function viewSettings() {
     return `<div class="group" style="--cat:var(--c-${c.id})"><h3><span aria-hidden="true">${c.emoji}</span> ${esc(c.name)}</h3><ul class="plain">${rows}</ul></div>`;
   }).join('');
 
+  const bulkBar = selectMode ? `<div class="bulk-bar">
+    <p class="small">${ui.selected.size} selected</p>
+    <div class="btn-row">
+      <select data-act="bulk-cat">${opt('', 'Move to…', '')}${CATEGORIES.map(c => opt(c.id, esc(c.name), '')).join('')}</select>
+      <button class="btn small" data-act="bulk-pause">Pause</button>
+      <button class="btn small" data-act="bulk-unpause">Unpause</button>
+      <button class="btn small danger-btn" data-act="bulk-delete">Delete</button>
+    </div>
+  </div>` : '';
+
   return `<header class="page-head"><h1>Settings</h1></header>
 
   <details class="fold" data-fold="habits"${ui.folds.habits ? ' open' : ''}>
     <summary>Habits <span class="count">${state.habits.length}</span></summary>
-    <div class="btn-row"><button class="btn primary" data-act="new-habit">Add a habit</button><button class="btn" data-act="add-multi">Add several at once</button></div>
+    <div class="btn-row">
+      <button class="btn primary" data-act="new-habit">Add a habit</button>
+      <button class="btn" data-act="add-multi">Add several at once</button>
+      <button class="btn${selectMode ? ' primary' : ''}" data-act="toggle-select">${selectMode ? 'Done selecting' : 'Select several'}</button>
+    </div>
+    ${bulkBar}
     ${habitGroups}
   </details>
 
@@ -1138,6 +1188,7 @@ function viewSettings() {
       ${numField('sleepGoal', 'Sleep hours', 3, 14, 0.5)}
       ${numField('waterBase', 'Base water amount (ml)', 500, 5000, 50)}
       ${numField('avgHr', 'Your average heart rate (bpm)', 40, 140)}
+      ${numField('plantGoal', 'Different plants today', 1, 30)}
       ${field('Spare days for streaks', `<select data-setting="graceDays">${[0, 1, 2, 3].map(n => opt(n, n === 0 ? 'None' : n + (n === 1 ? ' spare day' : ' spare days'), s.graceDays)).join('')}</select>`)}
     </section>
   </details>
@@ -1371,6 +1422,7 @@ document.addEventListener('click', e => {
   switch (act) {
     case 'tab': ui.tab = t.dataset.tab; ui.editId = null; ui.addMulti = false; render(); window.scrollTo(0, 0); break;
     case 'energy': mutate(() => { day(todayStr(), true).energy = t.dataset.val; }); break;
+    case 'plant-add': mutate(() => { const dd = day(todayStr(), true); dd.plants = Math.max(0, (dd.plants || 0) + (parseInt(t.dataset.n, 10) || 0)); }); break;
     case 'tick': if (h) handleTick(h, parseInt(t.dataset.tier, 10) || 0); break;
     case 'tier-next': ui.tierIdx[id] = (ui.tierIdx[id] || 0) + 1; render(); break;
     case 'open': ui.openId = ui.openId === id ? null : id; render(); break;
@@ -1391,6 +1443,23 @@ document.addEventListener('click', e => {
     case 'save-habit': saveHabit(); break;
     case 'add-multi': ui.addMulti = true; render(); window.scrollTo(0, 0); break;
     case 'cancel-multi': ui.addMulti = false; render(); break;
+    case 'toggle-select': ui.selectMode = !ui.selectMode; ui.selected.clear(); render(); break;
+    case 'select-habit':
+      if (id) { if (ui.selected.has(id)) ui.selected.delete(id); else ui.selected.add(id); render(); }
+      break;
+    case 'bulk-pause': case 'bulk-unpause':
+      if (ui.selected.size) {
+        state.habits.forEach(x => { if (ui.selected.has(x.id)) x.paused = (act === 'bulk-pause'); });
+        touchMeta(); save(); render(); toast(`${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'} ${act === 'bulk-pause' ? 'paused' : 'unpaused'}.`);
+      }
+      break;
+    case 'bulk-delete':
+      if (ui.selected.size && confirm(`Delete ${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'}? Your history stays, but they go.`)) {
+        const n = ui.selected.size;
+        state.habits = state.habits.filter(x => !ui.selected.has(x.id));
+        ui.selected.clear(); touchMeta(); save(); render(); toast(`Deleted ${n} habit${n === 1 ? '' : 's'}.`);
+      }
+      break;
     case 'save-multi': {
       const lines = document.getElementById('f-multi').value.split('\n').map(l => l.trim()).filter(Boolean);
       lines.forEach((name, i) => state.habits.push({ ...H('h' + Date.now().toString(36) + i, name, 'unsorted') }));
@@ -1467,6 +1536,12 @@ document.addEventListener('change', e => {
   } else if (t.dataset.act === 'quick-cat') {
     const h = habitById(t.dataset.id);
     if (h && t.value) { h.cat = t.value; touchMeta(); save(); render(); toast('Moved.'); }
+  } else if (t.dataset.act === 'bulk-cat') {
+    if (t.value && ui.selected.size) {
+      const n = ui.selected.size;
+      state.habits.forEach(x => { if (ui.selected.has(x.id)) x.cat = t.value; });
+      touchMeta(); save(); render(); toast(`Moved ${n} habit${n === 1 ? '' : 's'}.`);
+    }
   } else if (t.dataset.act === 'set-home') {
     if (t.dataset.id && t.value) { state.critters[t.dataset.id].home = t.value; touchMeta(); save(); render(); }
   } else if (t.dataset.field) {
