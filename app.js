@@ -30,6 +30,7 @@
 const CONFIG = {
   storageKey: 'healthyHub.v2',
   cloudKey: 'healthyHub.cloud',
+  backupKey: 'healthyHub.autobackup',
 
   // Three energy states. "goal" is the XP that counts as a good day (shown on Calendar).
   // "maxLevel" is the hardest habits suggested (1 easy, 2 medium, 3 high energy).
@@ -168,7 +169,8 @@ function freshState() {
   return {
     version: 3,
     startDate: todayStr(),
-    metaAt: Date.now(),                       // when habits or settings last changed (for syncing)
+    metaAt: 0,                                // 0, not now: a brand-new, never-edited copy must never
+                                               // out-rank real edits from another device when syncing
     settings: { ...DEFAULT_SETTINGS },
     habits: DEFAULT_HABITS.map(h => ({ ...h, options: [...h.options], days: [...h.days], companions: [...h.companions], tiers: [] })),
     // days['2026-09-19'] = { energy, steps, hr, temp, waterMl (added by hand), waterHealth (from Apple Health),
@@ -674,11 +676,33 @@ function mergeStates(local, remote) {
   return migrate(out);
 }
 
+// A safety copy of this device's data, taken right before it merges in
+// whatever another device has pushed. If a sync ever goes wrong, Settings
+// has a "Restore last safety copy" button that loads this back.
+function saveAutoBackup() {
+  try { localStorage.setItem(CONFIG.backupKey, JSON.stringify({ at: Date.now(), state })); }
+  catch (e) { /* not fatal — the sync can still go ahead */ }
+}
+function restoreAutoBackup() {
+  let raw;
+  try { raw = localStorage.getItem(CONFIG.backupKey); } catch (e) { /* ignore */ }
+  if (!raw) return toast('No safety copy found on this device yet.');
+  try {
+    const b = JSON.parse(raw);
+    state = migrate(b.state);
+    touchMeta(); save(); render();
+    toast('Safety copy restored, from ' + new Date(b.at).toLocaleString('en-GB'));
+  } catch (e) { toast('Could not read that safety copy.'); }
+}
+
 async function cloudSync() {
   if (!cloudReady() || cloud.busy) return;
   cloud.busy = true; render();
   try {
     const uid = cloud.cfg.session.uid;
+    // 0. Keep a copy of this device's data exactly as it is now, before anything
+    // from elsewhere is merged in — so a bad merge is never a total loss.
+    saveAutoBackup();
     // 1. Bring in the other device's copy
     const rows = await cloudApi(`/rest/v1/hub_state?select=data&user_id=eq.${uid}`);
     if (rows && rows[0] && rows[0].data) state = mergeStates(state, migrate(rows[0].data));
@@ -1125,6 +1149,7 @@ function viewSettings() {
     <div class="btn-row"><button class="btn" data-act="export">Download backup</button>
     <button class="btn" data-act="import">Restore from backup</button></div>
     <input id="import-file" type="file" accept="application/json" hidden>
+    ${autoBackupNote()}
   </section>`;
 }
 
@@ -1138,6 +1163,18 @@ function viewAddMulti() {
       <button class="btn" data-act="cancel-multi">Cancel</button>
     </div>
   </section>`;
+}
+
+// A quiet safety net: shows when this device last saved an automatic copy of
+// itself just before syncing, with a one-tap way back if a sync ever goes wrong.
+function autoBackupNote() {
+  let raw;
+  try { raw = localStorage.getItem(CONFIG.backupKey); } catch (e) { /* ignore */ }
+  if (!raw) return '';
+  let at;
+  try { at = JSON.parse(raw).at; } catch (e) { return ''; }
+  return `<p class="small">This device also keeps a safety copy from just before its last sync (${esc(new Date(at).toLocaleString('en-GB'))}).
+    <button class="btn small ghost" data-act="restore-auto-backup">Restore that safety copy</button></p>`;
 }
 
 function cloudPanel() {
@@ -1410,6 +1447,7 @@ document.addEventListener('click', e => {
       break;
     }
     case 'import': $('#import-file').click(); break;
+    case 'restore-auto-backup': restoreAutoBackup(); break;
   }
 });
 
