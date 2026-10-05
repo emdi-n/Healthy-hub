@@ -176,7 +176,7 @@ button:disabled { opacity: .4; cursor: default; }
 }
 .rows > .row:first-child { border-top: 0; }
 .tick {
-  grid-row: 1; width: 48px; height: 48px; border-radius: 50%;
+  grid-row: 1; grid-column: 1; width: 48px; height: 48px; border-radius: 50%;
   border: 2.5px solid var(--cat, var(--primary)); background: transparent;
   display: grid; place-items: center; color: var(--on-cat);
   transition: background .2s, transform .15s;
@@ -186,7 +186,7 @@ button:disabled { opacity: .4; cursor: default; }
 .tick .cnum { font-size: .8rem; color: var(--ink); }
 .row.is-done .tick { background: var(--cat); }
 .row.is-done .row-name { color: var(--ink-soft); }
-.row-main { min-width: 0; }
+.row-main { grid-row: 1; grid-column: 2; min-width: 0; }
 .row-name { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 2px 0; font-size: 1.02rem; font-weight: 550; }
 span.row-name { cursor: default; }
 .row-meta { display: flex; align-items: center; gap: 10px; font-size: .85rem; color: var(--ink-soft); }
@@ -207,7 +207,7 @@ span.row-name { cursor: default; }
 .mini.wide { font-size: .85rem; }
 .more { grid-column: 1 / -1; padding: 6px 4px 6px 60px; font-size: .92rem; }
 .more .notes { white-space: pre-line; color: var(--ink-soft); }
-.skip-btn { grid-row: 1; width: 32px; height: 32px; padding: 0; font-size: .85rem; color: var(--ink-soft); justify-self: end; }
+.skip-btn { grid-row: 1; grid-column: 3; width: 32px; height: 32px; padding: 0; font-size: .85rem; color: var(--ink-soft); justify-self: end; }
 .row.dim { opacity: .55; }
 .row.dim .tick { border-color: var(--ink-soft); }
 .goal-mini { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: .85rem; color: var(--ink-soft); }

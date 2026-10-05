@@ -122,7 +122,7 @@ const DEFAULT_HABITS = [
   H('plants', 'Plants', 'body', { type: 'plants', xp: 15 }),
 
   // Movement
-  H('steps', 'Step goal', 'move', { type: 'steps', level: 2, xp: 20 }),
+  H('steps', 'Steps', 'move', { type: 'steps', level: 2, xp: 20 }),
   H('exercise', 'Exercise time', 'move', { type: 'exercise', level: 2, xp: 20 }),
   H('walk', 'Walk', 'move', { freq: 2, level: 2, xp: 20, gentle: 'Stand at the door and breathe some fresh air',
     workoutMatch: 'walk,walking,hik',
@@ -136,7 +136,7 @@ const DEFAULT_HABITS = [
   H('water', 'Water', 'water', { type: 'water', xp: 20 }),
 
   // Sleep
-  H('sleep', 'Enough sleep', 'sleep', { type: 'sleep', xp: 15 }),
+  H('sleep', 'Sleep', 'sleep', { type: 'sleep', xp: 15 }),
   H('bed', 'Bedtime on track', 'sleep', { xp: 15 }),
   H('wake', 'Wake time on track', 'sleep'),
   H('restbefore', 'Rest in bed before sleep', 'sleep'),
@@ -913,7 +913,6 @@ function render() {
   const tabs = [['today', 'Today'], ['woodland', 'Woodland'], ['calendar', 'Calendar'], ['routines', 'Routines'], ['settings', 'Settings']];
   $('#nav').innerHTML = tabs.map(([id, label]) =>
     `<button data-act="tab" data-tab="${id}" class="${ui.tab === id ? 'on' : ''}" ${ui.tab === id ? 'aria-current="page"' : ''}>${icon(id)}<span>${label}</span></button>`).join('');
-  if (ui.sheet === 'data') refreshWaterBox();
 }
 
 // Background work (a sync, a weather fetch) redraws the page too, which can
@@ -948,8 +947,8 @@ function viewToday() {
 
   const calToday = todayStr();
   const rolloverBanner = calToday !== date
-    ? `<p class="rollover-note">Still logging as last night, until sleep syncs in (or ${ROLLOVER_FALLBACK_HOUR}am).
-       <button class="mini" data-act="force-rollover">I didn't log sleep — start today now</button></p>`
+    ? `<p class="rollover-note">Still last night, until sleep syncs (or ${ROLLOVER_FALLBACK_HOUR}am).
+       <button class="mini" data-act="force-rollover">Didn't log sleep</button></p>`
     : '';
 
   const hero = `
@@ -967,18 +966,25 @@ function viewToday() {
   // tap/NFC-tag through quickly (toothbrush, shower) get a glance tile too —
   // ringed full or empty, since there's no in-between for those.
   const ringAutos = activeHabits().filter(h => h.type !== 'plants' && autoInfo(h, date));
-  const glanceIds = ['teethAM', 'teethPM', 'shower'];
-  const glanceAutos = activeHabits().filter(h => !autoInfo(h, date) && (h.workoutMatch || glanceIds.includes(h.id)));
+  // Morning/evening brushing show as one combined tile: half-filled once either
+  // is done, full once both are — ticking still happens separately underneath
+  // (in the row list) and each one still earns its own xp as normal.
+  const toothHabits = ['teethAM', 'teethPM'].map(habitById).filter(x => x && !x.paused);
+  const toothTile = toothHabits.length ? (() => {
+    const n = toothHabits.filter(x => d && d.done[x.id]).length;
+    const pct = n / toothHabits.length;
+    return `<div class="auto-item${n === toothHabits.length ? ' met' : ''}">${miniRing(pct)}<div><p class="auto-name">Teeth</p><p class="small">${n} of ${toothHabits.length}</p></div></div>`;
+  })() : '';
+  const glanceIds = ['shower'];
+  const glanceAutos = activeHabits().filter(h => !autoInfo(h, date) && !['teethAM', 'teethPM'].includes(h.id) && (h.workoutMatch || glanceIds.includes(h.id)));
   const autos = [...ringAutos, ...glanceAutos];
-  const autoSection = autos.length ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${autos.map(h => {
+  const autoSection = (autos.length || toothTile) ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${toothTile}${autos.map(h => {
     const a = autoInfo(h, date);
     const doneEntry = d && d.done[h.id];
     const have = a ? a.have : (doneEntry ? 1 : 0), need = a ? a.need : 1, unit = a ? a.unit : '';
     const pct = need ? have / need : 0, met = have >= need && have > 0;
     const inner = `${miniRing(pct)}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${a ? `${fmtAmount(have)} / ${fmtAmount(need)} ${unit}` : (met ? 'Done' : 'Not yet')}</p></div>`;
-    return h.type === 'water'
-      ? `<button class="auto-item${met ? ' met' : ''}" data-act="data-sheet" aria-label="Water today. Tap for how it is worked out">${inner}</button>`
-      : `<div class="auto-item${met ? ' met' : ''}">${inner}</div>`;
+    return `<div class="auto-item${met ? ' met' : ''}">${inner}</div>`;
   }).join('')}</div></section>` : '';
 
   // Sort remaining (non-auto, non-water, non-plants) habits into groups
@@ -1009,11 +1015,15 @@ function viewToday() {
   }
   picks.sort((a, b) => b.sortKey - a.sortKey);
   const cap = 5;
-  const shown = resting ? core : core.concat(picks.slice(0, cap));
+  // Core habits are due regardless, so they always lead the list — but the
+  // cap is on the TOTAL shown, not just the non-core picks, or a day with
+  // several core habits could blow well past 5.
+  const combined = core.concat(picks);
+  const shown = resting ? core : combined.slice(0, cap);
   later.sort((a, b) => b.sortKey - a.sortKey);
   notDueYet.sort((a, b) => b.od.score - a.od.score);
   const more = resting ? [] : [
-    ...picks.slice(cap),
+    ...combined.slice(cap),
     ...later,
     ...notDueYet.map(x => ({ ...x, dim: true })),
     ...wrongTimeList.map(x => ({ ...x, dim: true })),
@@ -1394,7 +1404,7 @@ function viewSettings() {
     </div>
     <div class="btn-row">
       <input type="number" min="1" max="60" placeholder="Every X days" id="bulk-freq-n" style="width:120px">
-      <button class="btn small" data-act="bulk-freq">Set frequency</button>
+      <button class="btn small" data-act="bulk-freq">Frequency</button>
     </div>
     <div class="btn-row">
       <button class="btn small" data-act="bulk-toggle-core">${allCoreSel ? 'Unmark core' : 'Mark core'}</button>
@@ -1419,14 +1429,14 @@ function viewSettings() {
   <details class="fold" data-fold="goals"${ui.folds.goals ? ' open' : ''}>
     <summary>Goals</summary>
     <section class="panel form">
-      ${numField('stepGoal', 'Step goal', 100, 30000)}
-      ${numField('exerciseGoal', 'Exercise minutes', 5, 300)}
-      ${numField('standGoal', 'Standing hours', 1, 16)}
-      ${numField('sleepGoal', 'Sleep hours', 3, 14, 0.5)}
-      ${numField('waterBase', 'Base water amount (ml)', 500, 5000, 50)}
-      ${numField('avgHr', 'Your average heart rate (bpm)', 40, 140)}
-      ${numField('plantGoal', 'Different plants this week', 1, 60)}
-      ${field('Spare days for streaks', `<select data-setting="graceDays">${[0, 1, 2, 3].map(n => opt(n, n === 0 ? 'None' : n + (n === 1 ? ' spare day' : ' spare days'), s.graceDays)).join('')}</select>`)}
+      ${numField('stepGoal', 'Steps', 100, 30000)}
+      ${numField('exerciseGoal', 'Exercise (min)', 5, 300)}
+      ${numField('standGoal', 'Stand hours', 1, 16)}
+      ${numField('sleepGoal', 'Sleep (hrs)', 3, 14, 0.5)}
+      ${numField('waterBase', 'Base water (ml)', 500, 5000, 50)}
+      ${numField('avgHr', 'Avg heart rate', 40, 140)}
+      ${numField('plantGoal', 'Plants (weekly)', 1, 60)}
+      ${field('Spare days', `<select data-setting="graceDays">${[0, 1, 2, 3].map(n => opt(n, n === 0 ? 'None' : n + (n === 1 ? ' day' : ' days'), s.graceDays)).join('')}</select>`)}
     </section>
     ${waterCalcPanel()}
   </details>
@@ -1434,7 +1444,7 @@ function viewSettings() {
   ${cloudPanel()}
 
   <section class="panel">
-    <h2>Back up your data</h2>
+    <h2>Backup</h2>
     <div class="btn-row"><button class="btn" data-act="export">Download backup</button>
     <button class="btn" data-act="import">Restore from backup</button></div>
     <input id="import-file" type="file" accept="application/json" hidden>
@@ -1462,19 +1472,32 @@ function autoBackupNote() {
   if (!raw) return '';
   let at;
   try { at = JSON.parse(raw).at; } catch (e) { return ''; }
-  return `<p class="small">This device also keeps a safety copy from just before its last sync (${esc(new Date(at).toLocaleString('en-GB'))}).
-    <button class="btn small ghost" data-act="restore-auto-backup">Restore that safety copy</button></p>`;
+  return `<p class="small">Safety copy from ${esc(new Date(at).toLocaleString('en-GB'))}.
+    <button class="btn small ghost" data-act="restore-auto-backup">Restore</button></p>`;
 }
 
 // How today's water target is worked out — moved here from a pop-up so the
 // explanation lives alongside the goals it's built from, not hidden behind a tap.
 function waterCalcPanel() {
-  const date = logicalToday(), plan = waterPlan(date), have = waterTotal(state.days[date]);
+  const date = logicalToday(), plan = waterPlan(date), d = state.days[date] || {}, have = waterTotal(d), g = CONFIG.glassMl;
   return `<section class="panel">
-    <h2>How your water target is worked out</h2>
-    <p class="small">Today: <strong>${num(plan.target)} ml</strong> target, ${num(have)} ml so far.</p>
+    <h2>Water</h2>
+    <p class="small">Today: <strong>${num(plan.target)} ml</strong> target, ${num(have)} ml so far${d.waterHealth ? ` (bottle ${num(d.waterHealth)}, by hand ${num(d.waterMl || 0)})` : ''}.</p>
+    <div class="btn-row">
+      <button class="btn small" data-act="water-add" data-ml="100">+100</button>
+      <button class="btn small" data-act="water-add" data-ml="${g}">+${g}</button>
+      <button class="btn small" data-act="water-add" data-ml="500">+500</button>
+      <button class="btn small ghost" data-act="water-add" data-ml="${-g}">Undo ${g}</button>
+    </div>
     <ul class="plain parts">${plan.parts.map(p => `<li><span>${p.label}${p.basis ? ` <em>${esc(p.basis)}</em>` : ''}</span><span>${p.add ? (p.ml ? '+' + num(p.ml) + ' ml' : '0') : num(p.ml) + ' ml'}</span></li>`).join('')}</ul>
-    <p class="hint-s">Base amount, plus extra for steps, heart rate, exercise and a hot forecast. If yesterday's energy was set to Rest, today gets a boost too — and if yesterday's total came in under 70% of your base amount, today adds a bit more to catch up.</p>
+    <p class="hint-s">Base, plus extra for steps, heart rate, exercise and a hot forecast. A Rest day yesterday adds some too, as does catching up if yesterday came in under 70% of base.</p>
+    <p class="small">${d.hcAt ? `Apple Health synced today at ${clock(d.hcAt)}` : 'No Apple Health data today yet.'}</p>
+    <div class="grid3">
+      ${field('Steps', `<input type="number" inputmode="numeric" min="0" data-field="steps" value="${d.steps || ''}">`)}
+      ${field('Heart rate', `<input type="number" inputmode="numeric" min="0" data-field="hr" placeholder="avg bpm" value="${d.hr || ''}">`)}
+      ${field('Temp °C', `<input type="number" inputmode="decimal" step="0.5" data-field="temp" value="${d.temp == null ? '' : d.temp}">`)}
+    </div>
+    <div class="btn-row"><button class="btn small" data-act="fetch-weather">Use forecast</button><span class="small" id="wx-status"></span></div>
   </section>`;
 }
 
@@ -1563,39 +1586,6 @@ function openOptionsSheet(h, date) {
     <div class="chips">${h.options.map(o => `<button class="chip" data-act="pick-option" data-id="${h.id}" data-val="${esc(o)}" data-date="${date}">${esc(o)}</button>`).join('')}</div>
     <div class="btn-row"><button class="btn primary" data-act="pick-option" data-id="${h.id}" data-val="" data-date="${date}">Just tick it</button>
     <button class="btn" data-act="close-sheet">Not yet</button></div>`, 'options');
-}
-
-// The water pop-up: how today's amount is worked out
-function openDataSheet() {
-  const d = state.days[logicalToday()] || {};
-  openSheet(`<h2>Water today</h2>
-    <p class="small">${d.hcAt ? `Apple Health synced at ${clock(d.hcAt)}` : ''}</p>
-    <div id="water-box"></div>
-    <div class="grid3">
-      ${field('Steps', `<input type="number" inputmode="numeric" min="0" data-field="steps" value="${d.steps || ''}">`)}
-      ${field('Heart rate', `<input type="number" inputmode="numeric" min="0" data-field="hr" placeholder="avg bpm" value="${d.hr || ''}">`)}
-      ${field('Temp °C', `<input type="number" inputmode="decimal" step="0.5" data-field="temp" value="${d.temp == null ? '' : d.temp}">`)}
-    </div>
-    <div class="btn-row"><button class="btn small" data-act="fetch-weather">Use today’s forecast</button><span class="small" id="wx-status"></span></div>
-    <button class="btn primary wide" data-act="close-sheet">Done</button>`, 'data');
-  refreshWaterBox();
-}
-
-function refreshWaterBox() {
-  const box = $('#water-box'); if (!box) return;
-  const date = logicalToday(), d = state.days[date] || {}, plan = waterPlan(date), have = waterTotal(d), g = CONFIG.glassMl;
-  box.innerHTML = `<div class="plan">
-    <p class="plan-target"><strong>${num(plan.target)} ml</strong> for today</p>
-    <ul class="plain parts">${plan.parts.map(p => `<li><span>${p.label}${p.basis ? ` <em>${esc(p.basis)}</em>` : ''}</span><span>${p.add ? (p.ml ? '+' + num(p.ml) + ' ml' : '0') : num(p.ml) + ' ml'}</span></li>`).join('')}</ul>
-    <div class="bar" style="--p:${Math.min(100, Math.round(100 * have / (plan.target || 1)))}%"></div>
-    <p class="small">${num(have)} of ${num(plan.target)} ml${d.waterHealth ? `. Bottle ${num(d.waterHealth)}, added by hand ${num(d.waterMl || 0)}` : ''}</p>
-    <div class="btn-row">
-      <button class="btn small" data-act="water-add" data-ml="100">+100</button>
-      <button class="btn small" data-act="water-add" data-ml="${g}">+${g}</button>
-      <button class="btn small" data-act="water-add" data-ml="500">+500</button>
-      <button class="btn small ghost" data-act="water-add" data-ml="${-g}">Undo ${g}</button>
-    </div>
-  </div>`;
 }
 
 let toastTimer;
@@ -1795,7 +1785,6 @@ document.addEventListener('click', e => {
       break;
     case 'pick-option': if (h) { const dt = t.dataset.date || logicalToday(); closeSheet(); mutate(() => { completeHabit(dt, h, 0, t.dataset.val); }); } break;
     case 'close-sheet': closeSheet(); break;
-    case 'data-sheet': openDataSheet(); break;
     case 'water-add': mutate(() => { const dd = day(logicalToday(), true); dd.waterMl = Math.max(0, (dd.waterMl || 0) + parseInt(t.dataset.ml, 10)); }); break;
     case 'fetch-weather': fetchWeather(); break;
     case 'pick-starter':
