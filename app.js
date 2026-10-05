@@ -79,8 +79,9 @@ const DEFAULT_SETTINGS = {
   waterBase: 1500,   // ml
   avgHr: 75,         // your typical average heart rate, for the water calculation
   graceDays: 1,      // spare days that don't break a streak
-  plantGoal: 5,      // different plants/veg/fruit/nuts/seeds/grains you're aiming for today
+  plantGoal: 30,     // different plants/veg/fruit/nuts/seeds/grains you're aiming for this week
   lat: null, lon: null,
+  rolloverOverride: null,   // see logicalToday() — a manual "roll over now" for one calendar date
 };
 
 // How each habit gets ticked
@@ -118,7 +119,7 @@ const DEFAULT_HABITS = [
   H('face', 'Wash face', 'body', { core: true, gentle: 'Face wipe' }),
   H('moist', 'Moisturise', 'body', { after: 'face' }),
   H('spf', 'SPF', 'body', { after: 'moist' }),
-  H('plants', 'Plant variety', 'body', { type: 'plants', xp: 15 }),
+  H('plants', 'Plants', 'body', { type: 'plants', xp: 15 }),
 
   // Movement
   H('steps', 'Step goal', 'move', { type: 'steps', level: 2, xp: 20 }),
@@ -180,6 +181,7 @@ function freshState() {
     //                        exerciseMin, standHr, sleepHr, workouts:[{name,ts}], done:{habitId:{xp,mode,detail,cat}}, mt }
     days: {},
     milestones: {},
+    routines: [],                 // [{id, name, habitIds:[]}] — named lists for the Routines tab
     buddy: null,                 // category id of your current buddy, e.g. "body"
     critters: {},                // { catId: { xp, home } } — every critter you've obtained
     buddySwapTokens: 0,          // earned at streak milestones, spent when you switch buddy
@@ -217,6 +219,8 @@ function migrate(s) {
     if (en && !CONFIG.energy[en]) s.days[date].energy = 'amber';
   }
   s.milestones = s.milestones || {};
+  if (!Array.isArray(s.routines)) s.routines = [];
+  s.routines.forEach(r => { if (!Array.isArray(r.habitIds)) r.habitIds = []; });
   s.startDate = s.startDate || f.startDate;
   s.metaAt = s.metaAt || 0;
   s.buddy = s.buddy || null;
@@ -261,12 +265,26 @@ const round1 = n => Math.round(n * 10) / 10;
 const clock = ts => new Date(ts).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 const weekdayNow = () => (new Date().getDay() + 6) % 7 + 1;      // 1=Mon .. 7=Sun
 const timeNow = () => { const d = new Date(); return pad(d.getHours()) + ':' + pad(d.getMinutes()); };
-const hasSchedule = h => (h.days && h.days.length) || (h.timeStart && h.timeEnd);
-function inSchedule(h) {
-  if (h.days && h.days.length && !h.days.includes(weekdayNow())) return false;
-  if (h.timeStart && h.timeEnd) { const t = timeNow(); if (t < h.timeStart || t > h.timeEnd) return false; }
-  return true;
+// "Logical" today: the calendar flips at midnight, but logging shouldn't —
+// brushing your teeth at 12:30am is still "tonight". Normally the day only
+// rolls over once last night's sleep has synced in from Apple Health, or by
+// a fixed fallback hour if it never does. Pressing "I didn't log sleep" sets
+// an override that rolls today over right away (it only matches today's own
+// calendar date, so it quietly stops applying once tomorrow actually comes).
+const ROLLOVER_FALLBACK_HOUR = 4;
+function logicalToday() {
+  const now = new Date(), calToday = dstr(now);
+  if (now.getHours() >= ROLLOVER_FALLBACK_HOUR) return calToday;
+  if (typeof state === 'undefined' || !state) return calToday;   // app still booting, state not loaded yet
+  const dd = state.days[calToday];
+  if (dd && typeof dd.sleepHr === 'number' && dd.sleepHr > 0) return calToday;
+  if (state.settings.rolloverOverride === calToday) return calToday;
+  return addDays(calToday, -1);
 }
+const hasSchedule = h => (h.days && h.days.length) || (h.timeStart && h.timeEnd);
+const schedDayOk = h => !(h.days && h.days.length) || h.days.includes(weekdayNow());
+const schedTimeOk = h => { if (!(h.timeStart && h.timeEnd)) return true; const t = timeNow(); return t >= h.timeStart && t <= h.timeEnd; };
+const inSchedule = h => schedDayOk(h) && schedTimeOk(h);
 const scheduleText = h => {
   const days = h.days && h.days.length ? h.days.map(n => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1]).join(', ') : '';
   const time = h.timeStart && h.timeEnd ? `${h.timeStart}–${h.timeEnd}` : '';
@@ -293,15 +311,39 @@ const waterTotal = d => ((d && d.waterHealth) || 0) + ((d && d.waterMl) || 0);
 // Falls back to 'amber' for a missing day AND for any energy value that isn't
 // one of the three current states (belt-and-braces alongside the migrate() remap).
 const energyOf = date => { const en = state.days[date] && state.days[date].energy; return en && CONFIG.energy[en] ? en : 'amber'; };
-const goalFor = date => CONFIG.energy[energyOf(date)].goal;
 const dayXp = date => { const d = state.days[date]; return d ? Object.values(d.done).reduce((s, x) => s + x.xp, 0) : 0; };
+// Smart goal: blends the static default for this energy level with a rolling
+// average of what was actually earned on past days at the same energy level,
+// so the target rises or falls with how the habits are actually going instead
+// of staying fixed. Needs at least 3 past days at this level before it kicks
+// in (otherwise there isn't enough signal and it just uses the static goal).
+function smartGoal(en) {
+  if (en === 'rest') return 0;
+  const base = CONFIG.energy[en].goal;
+  const today = logicalToday();
+  const xps = [];
+  for (const date in state.days) {
+    if (date >= today) continue;
+    const dd = state.days[date];
+    if (dd && dd.energy === en) {
+      const x = dayXp(date);
+      if (x > 0) xps.push(x);
+    }
+  }
+  if (xps.length < 3) return base;
+  const recent = xps.slice(-14);
+  const avg = recent.reduce((s, x) => s + x, 0) / recent.length;
+  const blended = Math.round(0.6 * avg + 0.4 * base);
+  return Math.max(10, blended);
+}
+const goalFor = date => smartGoal(energyOf(date));
 const goalMet = date => energyOf(date) !== 'rest' && dayXp(date) > 0 && dayXp(date) >= goalFor(date);
 // A day "counts" for streaks if you met your goal or rested on purpose
 const dayOk = date => { const d = state.days[date]; return !!d && (d.energy === 'rest' || goalMet(date)); };
 
 // ---- Streaks: rest days and a few spare days keep it going
 function streakInfo() {
-  const today = todayStr(), grace = state.settings.graceDays;
+  const today = logicalToday(), grace = state.settings.graceDays;
   let cur = dayOk(today) ? 1 : 0, gap = 0;
   for (let d = addDays(today, -1); d >= state.startDate; d = addDays(d, -1)) {
     if (dayOk(d)) { cur++; gap = 0; } else { gap++; if (gap > grace) break; }
@@ -384,6 +426,27 @@ function waterPlan(date) {
   return { target, parts };
 }
 
+// ---- Plants this week: the well-known "30 different plants a week" diversity
+// goal. Monday is the start of the week (same as the Calendar). Case-insensitive
+// so "Apple" and "apple" count once.
+const weekStartOf = date => addDays(date, -((parse(date).getDay() + 6) % 7));
+function weeklyPlants(date) {
+  const start = weekStartOf(date), seen = new Map();
+  for (let i = 0; i < 7; i++) {
+    const dd = state.days[addDays(start, i)];
+    (dd && dd.plantsList || []).forEach(name => { const k = name.trim().toLowerCase(); if (k && !seen.has(k)) seen.set(k, name.trim()); });
+  }
+  return seen;
+}
+const COMMON_PLANTS = [
+  'Apple', 'Banana', 'Blueberries', 'Strawberries', 'Orange', 'Broccoli', 'Spinach', 'Kale',
+  'Carrot', 'Pepper', 'Tomato', 'Onion', 'Garlic', 'Cucumber', 'Courgette', 'Mushroom',
+  'Potato', 'Sweet potato', 'Avocado', 'Lettuce', 'Peas', 'Sweetcorn', 'Chickpeas', 'Lentils',
+  'Black beans', 'Kidney beans', 'Almonds', 'Walnuts', 'Peanuts', 'Oats', 'Brown rice',
+  'Quinoa', 'Wholemeal bread', 'Flaxseed', 'Chia seeds', 'Olive oil', 'Lemon', 'Ginger',
+  'Basil', 'Coriander',
+];
+
 // ---- Habits that fill themselves in from Apple Health data
 function autoInfo(h, date) {
   const d = state.days[date] || {}, s = state.settings;
@@ -393,11 +456,20 @@ function autoInfo(h, date) {
     case 'stand':    return { have: d.standHr || 0,      need: s.standGoal,    unit: 'hours' };
     case 'sleep':    return { have: d.sleepHr || 0,      need: s.sleepGoal,    unit: 'hours' };
     case 'water':    return { have: waterTotal(d),       need: waterPlan(date).target, unit: 'ml' };
-    case 'plants':   return { have: d.plants || 0,        need: s.plantGoal,    unit: 'plants' };
+    case 'plants':   return { have: weeklyPlants(date).size, need: s.plantGoal, unit: 'plants this week' };
   }
   return null;
 }
 const fmtAmount = n => num(round1(n));
+
+// ---- XP is set automatically from how much energy a habit needs and how
+// often it comes up, rather than typed in by hand. Rarer and harder habits
+// earn more. (Custom "Levels, easiest first" text still overrides this.)
+function autoXp(level, freq, onSetDays) {
+  const base = { 1: 8, 2: 15, 3: 22 }[level] || 10;
+  const bonus = onSetDays ? 0 : Math.min(10, Math.round((Math.max(1, freq) - 1) * 1.5));
+  return base + bonus;
+}
 
 // ---- The tiers of a habit, easiest first. Falls back to a simple two-step
 // version from the "gentle" text, or just the habit itself if neither is set.
@@ -430,7 +502,7 @@ function checkMilestones() {
   const msgs = [];
   for (const m of milestoneList()) {
     if (m.have >= m.need && !state.milestones[m.id]) {
-      state.milestones[m.id] = { date: todayStr(), xp: m.xp, label: m.label };
+      state.milestones[m.id] = { date: logicalToday(), xp: m.xp, label: m.label };
       msgs.push(`Milestone: ${m.label}`);
       state.buddySwapTokens++;
       if (m.streak && !state.mystery) {
@@ -542,7 +614,7 @@ function handleTick(h, tierIdx, forDate) {
 function handleHash() {
   const raw = location.hash.replace(/^#/, '');
   if (!raw) return;
-  const p = new URLSearchParams(raw), date = todayStr();
+  const p = new URLSearchParams(raw), date = logicalToday();
   mutate(() => {
     const d = day(date, true);
     if (p.has('energy') && CONFIG.energy[p.get('energy')]) d.energy = p.get('energy');
@@ -626,7 +698,7 @@ function applyInbox(payload) {
   if (Array.isArray(data.metrics)) applyHealth(data.metrics).forEach(x => dates.add(x));
   if (Array.isArray(data.workouts)) applyWorkouts(data.workouts).forEach(x => dates.add(x));
   if (Array.isArray(data.done)) {
-    const date = data.date || todayStr();
+    const date = data.date || logicalToday();
     data.done.forEach(id => { const h = habitById(id); if (h && !(state.days[date] && state.days[date].done[h.id])) completeHabit(date, h, 0); dates.add(date); });
   }
   return dates;
@@ -669,13 +741,42 @@ async function cloudApi(path, opts = {}) {
 }
 
 // Combine two copies. Each day keeps whichever copy changed last; habits/settings/buddy follow the newer edit.
+// Merging one day record from each side. A single "last touched" timestamp
+// decides which side's plain readings (energy, steps, temp...) are more
+// current — fine for those, since they're just the latest snapshot. But
+// habit completions, workouts, skips and logged plants are each individual
+// facts, not a snapshot: whichever side has one, it stays, however stale
+// that side's timestamp looks. This is what stops a device that merely
+// opened the app (and so has a "newer" touch on an otherwise-empty day)
+// from silently wiping out habits ticked earlier elsewhere.
+function mergeDay(local, remote) {
+  if (!local) return remote;
+  if (!remote) return local;
+  const newer = (local.mt || 0) >= (remote.mt || 0) ? local : remote;
+  const older = newer === local ? remote : local;
+  const seenWorkout = new Set(), workouts = [];
+  [...(older.workouts || []), ...(newer.workouts || [])].forEach(w => {
+    const k = (w.name || '') + '|' + w.ts;
+    if (!seenWorkout.has(k)) { seenWorkout.add(k); workouts.push(w); }
+  });
+  const seenPlant = new Set(), plantsList = [];
+  [...(older.plantsList || []), ...(newer.plantsList || [])].forEach(p => {
+    const k = (p || '').trim().toLowerCase();
+    if (k && !seenPlant.has(k)) { seenPlant.add(k); plantsList.push(p); }
+  });
+  return {
+    ...newer,
+    done: { ...older.done, ...newer.done },
+    skipped: { ...(older.skipped || {}), ...(newer.skipped || {}) },
+    workouts, plantsList,
+  };
+}
+
 function mergeStates(local, remote) {
   const base = (local.metaAt || 0) >= (remote.metaAt || 0) ? local : remote;
-  const out = { ...base, days: { ...remote.days }, milestones: { ...remote.milestones, ...local.milestones } };
-  for (const date in local.days) {
-    const r = remote.days[date];
-    if (!r || (local.days[date].mt || 0) >= (r.mt || 0)) out.days[date] = local.days[date];
-  }
+  const out = { ...base, days: {}, milestones: { ...remote.milestones, ...local.milestones } };
+  const dates = new Set([...Object.keys(local.days || {}), ...Object.keys(remote.days || {})]);
+  for (const date of dates) out.days[date] = mergeDay(local.days[date], (remote.days || {})[date]);
   out.startDate = [local.startDate, remote.startDate].filter(Boolean).sort()[0];
   return migrate(out);
 }
@@ -701,7 +802,7 @@ function restoreAutoBackup() {
 
 async function cloudSync() {
   if (!cloudReady() || cloud.busy) return;
-  cloud.busy = true; render();
+  cloud.busy = true; safeRender();
   try {
     const uid = cloud.cfg.session.uid;
     // 0. Keep a copy of this device's data exactly as it is now, before anything
@@ -717,7 +818,7 @@ async function cloudSync() {
       const before = doneKeys(), dates = new Set();
       inbox.forEach(row => applyInbox(row.data).forEach(x => dates.add(x)));
       dates.forEach(d => syncAuto(d));
-      const msgs = [...doneKeys()].filter(k => !before.has(k) && k.startsWith(todayStr()))
+      const msgs = [...doneKeys()].filter(k => !before.has(k) && k.startsWith(logicalToday()))
         .map(k => { const h = habitById(k.split('|')[1]); return `${h ? h.name : 'Habit'} done automatically`; });
       msgs.push(...checkMilestones());
       saveLocal();
@@ -738,7 +839,7 @@ async function cloudSync() {
     cloud.error = String(e.message || e);
     if (/401|JWT|expired/i.test(cloud.error)) cloud.error += ' You may need to sign in again.';
   } finally {
-    cloud.busy = false; render();
+    cloud.busy = false; safeRender();
   }
 }
 
@@ -752,7 +853,7 @@ async function autoWeather() {
     const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=1`);
     const t = (await r.json()).daily.temperature_2m_max[0];
     const dd = day(today, true); dd.temp = round1(t); dd.tempOn = today;
-    save(); render();
+    save(); safeRender();
   } catch (e) { /* offline is fine */ }
 }
 
@@ -761,10 +862,11 @@ async function autoWeather() {
    9. SCREENS
    --------------------------------------------------------------------- */
 const ui = {
-  folds: {}, tab: 'today', date: todayStr(), openId: null, editId: null, sheet: null,
-  calMonth: todayStr().slice(0, 7), calDetail: null, calEdit: false,
+  folds: {}, tab: 'today', date: logicalToday(), openId: null, editId: null, sheet: null,
+  calMonth: logicalToday().slice(0, 7), calDetail: null, calEdit: false,
   tierIdx: {}, addMulti: false, swapPick: null,
-  selectMode: false, selected: new Set(),
+  selectMode: false, selected: new Set(), returnScroll: 0, todaySort: 'recommended',
+  routineOpen: null, routineEditId: null, routinePickIds: new Set(),
 };
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -776,6 +878,7 @@ const ICONS = {
   woodland: '<path d="M12 21v-5"/><path d="M12 16c-4 0-6.5-2.4-6.5-5.4 0-2 1.3-3.6 3-4.1C8.9 4 10.2 2.5 12 2.5s3.1 1.5 3.5 4c1.7.5 3 2.1 3 4.1 0 3-2.5 5.4-6.5 5.4z"/>',
   calendar: '<rect x="4" y="5" width="16" height="15" rx="3"/><path d="M8 3v4M16 3v4M4 10h16"/>',
   settings: '<path d="M4 8h10M18 8h2M4 16h2M10 16h10"/><circle cx="16" cy="8" r="2"/><circle cx="8" cy="16" r="2"/>',
+  routines: '<path d="M5 6h2M5 12h2M5 18h2"/><path d="M5 6l.8.8L7 5.4"/><path d="M5 12l.8.8L7 11.4"/><path d="M5 18l.8.8L7 17.4"/><path d="M10 6h9M10 12h9M10 18h9"/>',
 };
 const icon = name => `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
 const CHECK = '<svg viewBox="0 0 24 24" class="chk" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>';
@@ -804,120 +907,190 @@ function treeSvg(pct) {
 }
 
 function render() {
-  const views = { today: viewToday, woodland: viewWoodland, calendar: viewCalendar, settings: viewSettings };
-  document.body.dataset.tone = ui.tab === 'today' ? energyOf(todayStr()) : 'calm';
+  const views = { today: viewToday, woodland: viewWoodland, calendar: viewCalendar, routines: viewRoutines, settings: viewSettings };
+  document.body.dataset.tone = ui.tab === 'today' ? energyOf(logicalToday()) : 'calm';
   $('#app').innerHTML = views[ui.tab]();
-  const tabs = [['today', 'Today'], ['woodland', 'Woodland'], ['calendar', 'Calendar'], ['settings', 'Settings']];
+  const tabs = [['today', 'Today'], ['woodland', 'Woodland'], ['calendar', 'Calendar'], ['routines', 'Routines'], ['settings', 'Settings']];
   $('#nav').innerHTML = tabs.map(([id, label]) =>
     `<button data-act="tab" data-tab="${id}" class="${ui.tab === id ? 'on' : ''}" ${ui.tab === id ? 'aria-current="page"' : ''}>${icon(id)}<span>${label}</span></button>`).join('');
   if (ui.sheet === 'data') refreshWaterBox();
+}
+
+// Background work (a sync, a weather fetch) redraws the page too, which can
+// otherwise land mid-tap or close a dropdown you're in the middle of choosing
+// from. This waits for you to finish with whatever's focused before redrawing.
+let safeRenderTimer;
+function safeRender() {
+  const ae = document.activeElement, app = $('#app');
+  if (ae && app && app.contains(ae) && ['SELECT', 'INPUT', 'TEXTAREA'].includes(ae.tagName)) {
+    clearTimeout(safeRenderTimer); safeRenderTimer = setTimeout(safeRender, 400); return;
+  }
+  render();
 }
 
 // ---------------- TODAY ----------------
 const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
 
 function viewToday() {
-  const date = todayStr(), d = state.days[date];
+  const date = logicalToday(), d = state.days[date];
   const chosen = d && d.energy, en = energyOf(date), cfg = CONFIG.energy[en];
   const resting = en === 'rest';
+  const skipped = (d && d.skipped) || {};
 
   const pebbles = Object.entries(CONFIG.energy).map(([key, c]) =>
     `<button class="pebble e-${key}${chosen === key ? ' on' : ''}" data-act="energy" data-val="${key}" aria-pressed="${chosen === key}"><i></i>${c.label}</button>`).join('');
+
+  const xp = dayXp(date), goal = goalFor(date);
+  const goalPct = goal ? Math.min(1, xp / goal) : 0;
+  const goalLine = chosen && !resting
+    ? `<p class="goal-mini">${miniRing(goalPct)}<span>${num(xp)} of ${num(goal)} xp${goalMet(date) ? ' — goal met' : ''}</span></p>`
+    : '';
+
+  const calToday = todayStr();
+  const rolloverBanner = calToday !== date
+    ? `<p class="rollover-note">Still logging as last night, until sleep syncs in (or ${ROLLOVER_FALLBACK_HOUR}am).
+       <button class="mini" data-act="force-rollover">I didn't log sleep — start today now</button></p>`
+    : '';
 
   const hero = `
     <section class="hero">
       <p class="hello"><span>${greeting()}</span><span class="date">${prettyDate(date)}</span></p>
       <h1 class="q">${chosen ? 'Your energy' : 'How is your energy today?'}</h1>
       <div class="pebbles" role="group" aria-label="Energy for the day">${pebbles}</div>
+      ${goalLine}
+      ${rolloverBanner}
     </section>`;
 
   // Auto habits (steps, exercise, standing, sleep) get their own section with a small ring each
-  // (water and plants get their own cards instead, further down)
-  const autos = activeHabits().filter(h => h.type !== 'water' && h.type !== 'plants' && autoInfo(h, date));
+  // (water and plants get their own cards instead, further down). Habits that
+  // auto-tick from an Apple Health workout match (walk, PT, swim) or that you
+  // tap/NFC-tag through quickly (toothbrush, shower) get a glance tile too —
+  // ringed full or empty, since there's no in-between for those.
+  const ringAutos = activeHabits().filter(h => h.type !== 'plants' && autoInfo(h, date));
+  const glanceIds = ['teethAM', 'teethPM', 'shower'];
+  const glanceAutos = activeHabits().filter(h => !autoInfo(h, date) && (h.workoutMatch || glanceIds.includes(h.id)));
+  const autos = [...ringAutos, ...glanceAutos];
   const autoSection = autos.length ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${autos.map(h => {
-    const a = autoInfo(h, date), pct = a.need ? a.have / a.need : 0, met = a.have >= a.need && a.have > 0;
-    return `<div class="auto-item${met ? ' met' : ''}">${miniRing(pct)}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${fmtAmount(a.have)} / ${fmtAmount(a.need)} ${a.unit}</p></div></div>`;
+    const a = autoInfo(h, date);
+    const doneEntry = d && d.done[h.id];
+    const have = a ? a.have : (doneEntry ? 1 : 0), need = a ? a.need : 1, unit = a ? a.unit : '';
+    const pct = need ? have / need : 0, met = have >= need && have > 0;
+    const inner = `${miniRing(pct)}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${a ? `${fmtAmount(have)} / ${fmtAmount(need)} ${unit}` : (met ? 'Done' : 'Not yet')}</p></div>`;
+    return h.type === 'water'
+      ? `<button class="auto-item${met ? ' met' : ''}" data-act="data-sheet" aria-label="Water today. Tap for how it is worked out">${inner}</button>`
+      : `<div class="auto-item${met ? ' met' : ''}">${inner}</div>`;
   }).join('')}</div></section>` : '';
 
-  // Sort remaining (non-auto, non-water) habits into groups
-  const core = [], picks = [], later = [], notDue = [], done = [];
+  // Sort remaining (non-auto, non-water, non-plants) habits into groups
+  const core = [], picks = [], later = [], notDueYet = [], wrongTimeList = [], wrongDayList = [], done = [], skippedList = [];
   let hidden = 0;
   for (const h of activeHabits()) {
-    if (h.type === 'water' || autoInfo(h, date)) continue;   // shown in the tree / auto section instead
+    if (h.type === 'water' || h.type === 'plants' || autoInfo(h, date)) continue;   // shown in the tree / auto section instead
     if (d && d.done[h.id]) { done.push({ h }); continue; }
+    if (skipped[h.id]) { skippedList.push({ h }); continue; }
     if (h.after) { const pre = habitById(h.after); if (pre && !pre.paused && !(d && d.done[pre.id])) { hidden++; continue; } }
     const od = overdue(h, date);
-    const scheduleOk = !hasSchedule(h) || inSchedule(h);
 
     if (resting) {
-      if (h.core && scheduleOk) core.push({ h, od });
+      if (h.core && schedDayOk(h)) core.push({ h, od });
       continue;   // rest days: only core habits, nothing else is offered
     }
-    if (!scheduleOk) { later.push({ h, od }); continue; }
+    if (!schedDayOk(h)) { wrongDayList.push({ h, od }); continue; }
+    if (!schedTimeOk(h)) { wrongTimeList.push({ h, od }); continue; }
     const canDo = h.level <= cfg.maxLevel;
     const gapBoost = 1 + Math.min(1, categoryGapDays(h.cat, date) / 10);
-    const scheduleBoost = hasSchedule(h) && scheduleOk ? 1000 : 0;
+    const scheduleBoost = hasSchedule(h) ? 1000 : 0;
     const sortKey = scheduleBoost + od.score * gapBoost;
-    if (h.core && canDo) core.push({ h, od, sortKey: 1000000 });
-    else if (od.score >= 1) (canDo ? picks : later).push({ h, od, sortKey });
-    else notDue.push({ h, od });
+    const due = od.score >= 1;
+    if (h.core && due && canDo) core.push({ h, od, sortKey: 1000000 });
+    else if (due && canDo) picks.push({ h, od, sortKey });
+    else if (due) later.push({ h, od, sortKey });
+    else notDueYet.push({ h, od });
   }
   picks.sort((a, b) => b.sortKey - a.sortKey);
-  const cap = CONFIG.maxSuggested[en] || 5;
+  const cap = 5;
   const shown = resting ? core : core.concat(picks.slice(0, cap));
-  const more = resting ? [] : picks.slice(cap).concat(later).sort((a, b) => b.sortKey - a.sortKey);
-  if (!resting) notDue.sort((a, b) => b.od.score - a.od.score);
+  later.sort((a, b) => b.sortKey - a.sortKey);
+  notDueYet.sort((a, b) => b.od.score - a.od.score);
+  const more = resting ? [] : [
+    ...picks.slice(cap),
+    ...later,
+    ...notDueYet.map(x => ({ ...x, dim: true })),
+    ...wrongTimeList.map(x => ({ ...x, dim: true })),
+    ...wrongDayList.map(x => ({ ...x, dim: true })),
+  ];
 
-  const list = items => `<ul class="rows">${items.map(x => rowHtml(x.h, x.od, date)).join('')}</ul>`;
-  const fold = (key, title, items) => items.length ? `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${title} <span class="count">${items.length}</span></summary>${list(items)}</details>` : '';
+  const list = (items, opts) => `<ul class="rows">${items.map(x => rowHtml(x.h, x.od, date, { dim: x.dim, skippable: opts && opts.skippable })).join('')}</ul>`;
+  const fold = (key, title, items, opts) => items.length ? `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${title} <span class="count">${items.length}</span></summary>${list(items, opts)}</details>` : '';
 
-  let body = waterCard(date) + plantCard(date) + autoSection;
-  if (shown.length) body += `<section class="panel"><h2>Suggested</h2>${list(shown)}</section>`;
+  const sortToggle = !resting && shown.length ? `<div class="sort-toggle" role="group" aria-label="Sort suggested">
+    <button class="chip${ui.todaySort !== 'category' ? ' on' : ''}" data-act="today-sort" data-val="recommended">Recommended</button>
+    <button class="chip${ui.todaySort === 'category' ? ' on' : ''}" data-act="today-sort" data-val="category">By category</button>
+  </div>` : '';
+
+  let suggestedBody;
+  if (ui.todaySort === 'category' && !resting) {
+    suggestedBody = CATEGORIES.map(c => {
+      const items = shown.filter(x => x.h.cat === c.id);
+      return items.length ? `<div class="cat-group"><h3 class="cat-subhead"><span aria-hidden="true">${c.emoji}</span> ${esc(c.name)}</h3>${list(items, { skippable: true })}</div>` : '';
+    }).join('');
+  } else {
+    suggestedBody = list(shown, { skippable: true });
+  }
+
+  let body = plantCard(date) + autoSection;
+  if (shown.length) body += `<section class="panel"><h2>Suggested</h2>${sortToggle}${suggestedBody}</section>`;
   else if (!resting) body += `<section class="panel"><p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p></section>`;
-  body += fold('more', 'More', more);
-  if (done.length) body += `<section class="panel done-panel"><h2>Done</h2>${list(done)}</section>`;
-  body += fold('notdue', 'Not due yet', notDue);
+  body += fold('more', 'More', more, { skippable: true });
+  body += fold('done', 'Done', done);
+  if (skippedList.length) {
+    const rows = skippedList.map(x => `<li class="row dim" style="--cat:var(--c-${x.h.cat})">
+      <span class="row-main"><span class="row-name">${esc(x.h.name)}</span></span>
+      <button class="mini" data-act="unskip-today" data-id="${x.h.id}">Undo</button>
+    </li>`).join('');
+    body += `<details class="fold" data-fold="skipped"${ui.folds.skipped ? ' open' : ''}><summary>Skipped today <span class="count">${skippedList.length}</span></summary><ul class="rows">${rows}</ul></details>`;
+  }
   return hero + body;
 }
 
-// The tree: fills with blue as you drink. Tap it for today's numbers.
-function waterCard(date) {
-  const h = activeHabits().find(x => x.type === 'water');
-  if (!h) return '';
-  const d = state.days[date], plan = waterPlan(date), have = waterTotal(d), pct = plan.target ? Math.min(1, have / plan.target) : 0;
-  const entry = d && d.done[h.id];
-  return `<button class="panel water-card" data-act="data-sheet" aria-label="Water today. Tap for how it is worked out">
-    ${treeSvg(pct)}
-    <div class="wc-text">
-      <p class="small">Water</p>
-      <p class="big">${num(have)} of ${num(plan.target)} ml</p>
-      <p class="small">${Math.round(pct * 100)}%${entry ? `, +${entry.xp} xp` : ''}</p>
-    </div>
-  </button>`;
-}
-
-// Plant variety: a simple tap counter. Taps beat a slider or a wheel here —
-// the number is always small (0–10ish) and a slow, fiddly control is the
-// last thing you want reaching for a snack. Each leaf is one plant so far.
+// Plants: a weekly tally of DIFFERENT plants (fruit, veg, grains, nuts, pulses,
+// herbs) rather than a daily count — that's the actual "30 plants a week"
+// diversity goal, so a per-day tap counter didn't make sense. A dropdown of
+// common ones plus free text is faster than typing every time, and the chips
+// double as a reminder of what you've already had this week.
 function plantCard(date) {
   const h = activeHabits().find(x => x.type === 'plants');
   if (!h) return '';
-  const d = state.days[date], have = (d && d.plants) || 0, goal = state.settings.plantGoal, entry = d && d.done[h.id];
-  const leaves = Array.from({ length: Math.max(goal, have) }, (_, i) => `<span class="leaf${i < have ? ' on' : ''}"></span>`).join('');
+  const week = weeklyPlants(date), have = week.size, goal = state.settings.plantGoal;
+  const pct = goal ? Math.min(1, have / goal) : 0;
+  const entry = state.days[date] && state.days[date].done[h.id];
+  const chips = [...week.values()].map(n => `<span class="chip small">${esc(n)}</span>`).join('');
   return `<section class="panel plant-card">
     <div class="plant-head">
-      <p class="small">Plant variety</p>
+      <p class="small">Plants this week</p>
       <p class="big">${have} of ${goal}${entry ? `, +${entry.xp} xp` : ''}</p>
     </div>
-    <div class="leaf-row" role="group" aria-label="Different plants today">${leaves}</div>
-    <div class="btn-row">
-      <button class="btn primary small" data-act="plant-add" data-n="1">+1 plant</button>
-      <button class="btn ghost small" data-act="plant-add" data-n="-1"${have ? '' : ' disabled'}>Undo one</button>
-    </div>
+    <div class="bar thin" style="--p:${Math.round(pct * 100)}%"></div>
+    ${chips ? `<div class="plant-chips">${chips}</div>` : '<p class="small">None logged yet this week.</p>'}
+    <button class="btn primary small" data-act="plant-sheet">Add a plant</button>
   </section>`;
 }
 
-function rowHtml(h, od, date) {
+function openPlantSheet() {
+  const date = logicalToday(), already = weeklyPlants(date);
+  const options = COMMON_PLANTS.filter(p => !already.has(p.toLowerCase()));
+  openSheet(`<h2>Add a plant</h2>
+    <p class="small">Fruit, veg, grains, nuts, pulses, herbs — anything plant-based you've had today.</p>
+    ${options.length ? `<div class="chips">${options.map(p => `<button class="chip" data-act="plant-pick" data-val="${esc(p)}">${esc(p)}</button>`).join('')}</div>` : ''}
+    <div class="field"><span class="lab">Something else</span>
+      <div class="btn-row"><input id="f-plant-custom" type="text" maxlength="40" placeholder="e.g. Figs" style="flex:1 1 auto">
+      <button class="btn primary" data-act="plant-pick-custom">Add</button></div>
+    </div>
+    <button class="btn" data-act="close-sheet">Done</button>`, 'plant');
+}
+
+function rowHtml(h, od, date, opts) {
+  opts = opts || {};
   const d = state.days[date], entry = d && d.done[h.id], open = ui.openId === h.id;
   const link = safeUrl(h.link), hasMore = !!(h.notes || link);
   const tiers = tiersOf(h), idx = Math.min(ui.tierIdx[h.id] || 0, tiers.length - 1), tier = tiers[idx];
@@ -946,13 +1119,17 @@ function rowHtml(h, od, date) {
     more = `<div class="more">${h.notes ? `<p class="notes">${esc(h.notes)}</p>` : ''}${media}</div>`;
   }
 
-  return `<li class="row${entry ? ' is-done' : ''}" style="--cat:var(--c-${h.cat})">
+  const skipBtn = !entry && opts.skippable
+    ? `<button class="mini skip-btn" data-act="skip-today" data-id="${h.id}" aria-label="Not today: ${title}">✕</button>` : '';
+
+  return `<li class="row${entry ? ' is-done' : ''}${opts.dim ? ' dim' : ''}" style="--cat:var(--c-${h.cat})">
     <button class="tick" data-act="tick" data-id="${h.id}" data-tier="${idx}" aria-label="${entry ? 'Undo' : 'Mark done'}: ${title}">${entry ? CHECK : ''}</button>
     <div class="row-main">
       ${nameEl}
       ${meta || tag || sched ? `<span class="row-meta">${meta}${tag}${sched}</span>` : ''}
       ${nextTier}
     </div>
+    ${skipBtn}
     ${more}
   </li>`;
 }
@@ -1044,7 +1221,7 @@ function swapSheet() {
 
 // ---------------- CALENDAR ----------------
 function viewCalendar() {
-  const [y, m] = ui.calMonth.split('-').map(Number), today = todayStr();
+  const [y, m] = ui.calMonth.split('-').map(Number), today = logicalToday();
   const offset = (new Date(y, m - 1, 1, 12).getDay() + 6) % 7;   // week starts on Monday
   const count = new Date(y, m, 0).getDate();
   const title = new Date(y, m - 1, 1, 12).toLocaleDateString('en-GB', { month: 'long', year: 'numeric' });
@@ -1065,6 +1242,12 @@ function viewCalendar() {
   const next = ms.filter(m => !state.milestones[m.id]).slice(0, 4);
 
   return `<header class="page-head"><h1>Calendar</h1></header>
+    <section class="panel stats">
+      <div><strong>${st.cur}</strong><span>day streak</span></div>
+      <div><strong>${st.best}</strong><span>best streak</span></div>
+      <div><strong>${met}</strong><span>goals met</span></div>
+      <div><strong>${num(xpSum)}</strong><span>xp this month</span></div>
+    </section>
     <section class="panel">
       <div class="cal-head">
         <button class="mini" data-act="cal-prev" aria-label="Previous month">&lsaquo;</button>
@@ -1077,20 +1260,14 @@ function viewCalendar() {
       </div>
       <p class="legend"><span class="lg e-green"></span>Good <span class="lg e-amber"></span>Steady <span class="lg e-rest"></span>Rest</p>
     </section>
-    <section class="panel stats">
-      <div><strong>${st.cur}</strong><span>day streak</span></div>
-      <div><strong>${st.best}</strong><span>best streak</span></div>
-      <div><strong>${met}</strong><span>goals met</span></div>
-      <div><strong>${num(xpSum)}</strong><span>xp this month</span></div>
-    </section>
+    ${ui.calDetail ? dayDetail(ui.calDetail) : ''}
     <details class="fold" data-fold="milestones"${ui.folds.milestones ? ' open' : ''}>
       <summary>Milestones <span class="count">${got.length}</span></summary>
       <section class="panel">
         ${got.length ? `<ul class="plain ms">${got.map(m => `<li class="got"><span>${esc(m.label)}</span><span>+${m.xp} xp</span></li>`).join('')}</ul>` : '<p class="empty">Your first milestone is not far away.</p>'}
         ${next.length ? `<h3 class="sub-h">Coming up</h3><ul class="plain ms">${next.map(m => `<li><span>${esc(m.label)}</span><span>${num(Math.min(m.have, m.need))} of ${num(m.need)}</span></li>`).join('')}</ul>` : ''}
       </section>
-    </details>
-    ${ui.calDetail ? dayDetail(ui.calDetail) : ''}`;
+    </details>`;
 }
 
 function dayDetail(date) {
@@ -1120,6 +1297,56 @@ function dayDetail(date) {
     ${en ? `<p class="small">${num(xp)} of ${num(cfg.goal)} xp${goalMet(date) ? ' — goal met' : ''}</p>` : ''}
     ${body}
   </section>`;
+}
+
+// ---------------- ROUTINES — named lists of habits to go through without
+// the rest of Today's noise (e.g. "Morning"). A simple filtered list: no
+// step-through runner, just the habits in that routine, tickable as usual.
+function viewRoutines() {
+  const date = logicalToday();
+  const addBtn = `<button class="btn primary small" data-act="routine-new">Add routine</button>`;
+  if (!state.routines.length) {
+    return `<section class="panel"><h2>Routines</h2>
+      <p class="empty">No routines yet. Make one for a set of habits you want to go through together, like a morning or evening wind-down — nothing else from Today will show up in it.</p>
+      ${addBtn}</section>`;
+  }
+  const cards = state.routines.map(r => {
+    const habits = r.habitIds.map(habitById).filter(Boolean).filter(h => !h.paused);
+    const rows = habits.length
+      ? `<ul class="rows">${habits.map(h => rowHtml(h, null, date, {})).join('')}</ul>`
+      : `<p class="empty">No habits in this routine yet.</p>`;
+    return `<section class="panel routine-card">
+      <div class="cal-head"><h2>${esc(r.name)}</h2>
+        <div class="btn-row">
+          <button class="mini pencil" data-act="routine-edit" data-id="${r.id}" aria-label="Edit ${esc(r.name)}">✎</button>
+          <button class="mini" data-act="routine-delete" data-id="${r.id}" aria-label="Delete ${esc(r.name)}">✕</button>
+        </div>
+      </div>
+      ${rows}
+    </section>`;
+  }).join('');
+  return `<section class="panel"><h2>Routines</h2>${addBtn}</section>${cards}`;
+}
+
+function openRoutineSheet() {
+  const editing = ui.routineEditId && ui.routineEditId !== 'new' ? state.routines.find(r => r.id === ui.routineEditId) : null;
+  const name = editing ? editing.name : '';
+  const picked = ui.routinePickIds;
+  const groups = CATEGORIES.map(c => {
+    const habits = state.habits.filter(h => h.cat === c.id && !h.paused);
+    if (!habits.length) return '';
+    return `<div class="cat-group"><h3 class="cat-subhead"><span aria-hidden="true">${c.emoji}</span> ${esc(c.name)}</h3>
+      ${habits.map(h => `<label class="routine-pick"><input type="checkbox" data-habit-pick="${h.id}"${picked.has(h.id) ? ' checked' : ''}> ${esc(h.name)}</label>`).join('')}
+    </div>`;
+  }).join('');
+  openSheet(`<h2>${editing ? 'Edit routine' : 'New routine'}</h2>
+    ${field('Name', `<input id="f-routine-name" type="text" maxlength="30" placeholder="e.g. Morning" value="${esc(name)}">`)}
+    <p class="small">Pick the habits that belong in this routine.</p>
+    <div class="routine-picks">${groups}</div>
+    <div class="btn-row">
+      <button class="btn primary" data-act="routine-save">Save</button>
+      <button class="btn" data-act="close-sheet">Cancel</button>
+    </div>`, 'routine');
 }
 
 // ---------------- SETTINGS (habits, goals, sync, backup) ----------------
@@ -1156,12 +1383,22 @@ function viewSettings() {
     return `<div class="group" style="--cat:var(--c-${c.id})"><h3><span aria-hidden="true">${c.emoji}</span> ${esc(c.name)}</h3><ul class="plain">${rows}</ul></div>`;
   }).join('');
 
+  const selHabits = state.habits.filter(x => ui.selected.has(x.id));
+  const allPausedSel = selHabits.length > 0 && selHabits.every(x => x.paused);
+  const allCoreSel = selHabits.length > 0 && selHabits.every(x => x.core);
   const bulkBar = selectMode ? `<div class="bulk-bar">
     <p class="small">${ui.selected.size} selected</p>
     <div class="btn-row">
-      <select data-act="bulk-cat">${opt('', 'Move to…', '')}${CATEGORIES.map(c => opt(c.id, esc(c.name), '')).join('')}</select>
-      <button class="btn small" data-act="bulk-pause">Pause</button>
-      <button class="btn small" data-act="bulk-unpause">Unpause</button>
+      <select data-act="bulk-cat">${opt('', 'Category…', '')}${CATEGORIES.map(c => opt(c.id, esc(c.name), '')).join('')}</select>
+      <select data-act="bulk-level">${opt('', 'Energy…', '')}${opt(1, 'Low', '')}${opt(2, 'Medium', '')}${opt(3, 'High', '')}</select>
+    </div>
+    <div class="btn-row">
+      <input type="number" min="1" max="60" placeholder="Every X days" id="bulk-freq-n" style="width:120px">
+      <button class="btn small" data-act="bulk-freq">Set frequency</button>
+    </div>
+    <div class="btn-row">
+      <button class="btn small" data-act="bulk-toggle-core">${allCoreSel ? 'Unmark core' : 'Mark core'}</button>
+      <button class="btn small" data-act="bulk-toggle-pause">${allPausedSel ? 'Unpause' : 'Pause'}</button>
       <button class="btn small danger-btn" data-act="bulk-delete">Delete</button>
     </div>
   </div>` : '';
@@ -1171,9 +1408,9 @@ function viewSettings() {
   <details class="fold" data-fold="habits"${ui.folds.habits ? ' open' : ''}>
     <summary>Habits <span class="count">${state.habits.length}</span></summary>
     <div class="btn-row">
-      <button class="btn primary" data-act="new-habit">Add a habit</button>
-      <button class="btn" data-act="add-multi">Add several at once</button>
-      <button class="btn${selectMode ? ' primary' : ''}" data-act="toggle-select">${selectMode ? 'Done selecting' : 'Select several'}</button>
+      <button class="btn primary" data-act="new-habit">Add</button>
+      <button class="btn" data-act="add-multi">Bulk add</button>
+      <button class="btn${selectMode ? ' primary' : ''}" data-act="toggle-select">${selectMode ? 'Done' : 'Select'}</button>
     </div>
     ${bulkBar}
     ${habitGroups}
@@ -1188,9 +1425,10 @@ function viewSettings() {
       ${numField('sleepGoal', 'Sleep hours', 3, 14, 0.5)}
       ${numField('waterBase', 'Base water amount (ml)', 500, 5000, 50)}
       ${numField('avgHr', 'Your average heart rate (bpm)', 40, 140)}
-      ${numField('plantGoal', 'Different plants today', 1, 30)}
+      ${numField('plantGoal', 'Different plants this week', 1, 60)}
       ${field('Spare days for streaks', `<select data-setting="graceDays">${[0, 1, 2, 3].map(n => opt(n, n === 0 ? 'None' : n + (n === 1 ? ' spare day' : ' spare days'), s.graceDays)).join('')}</select>`)}
     </section>
+    ${waterCalcPanel()}
   </details>
 
   ${cloudPanel()}
@@ -1228,6 +1466,18 @@ function autoBackupNote() {
     <button class="btn small ghost" data-act="restore-auto-backup">Restore that safety copy</button></p>`;
 }
 
+// How today's water target is worked out — moved here from a pop-up so the
+// explanation lives alongside the goals it's built from, not hidden behind a tap.
+function waterCalcPanel() {
+  const date = logicalToday(), plan = waterPlan(date), have = waterTotal(state.days[date]);
+  return `<section class="panel">
+    <h2>How your water target is worked out</h2>
+    <p class="small">Today: <strong>${num(plan.target)} ml</strong> target, ${num(have)} ml so far.</p>
+    <ul class="plain parts">${plan.parts.map(p => `<li><span>${p.label}${p.basis ? ` <em>${esc(p.basis)}</em>` : ''}</span><span>${p.add ? (p.ml ? '+' + num(p.ml) + ' ml' : '0') : num(p.ml) + ' ml'}</span></li>`).join('')}</ul>
+    <p class="hint-s">Base amount, plus extra for steps, heart rate, exercise and a hot forecast. If yesterday's energy was set to Rest, today gets a boost too — and if yesterday's total came in under 70% of your base amount, today adds a bit more to catch up.</p>
+  </section>`;
+}
+
 function cloudPanel() {
   const c = cloud.cfg;
   if (!cloudReady()) {
@@ -1240,7 +1490,7 @@ function cloudPanel() {
       ${cloud.error ? `<p class="err">${esc(cloud.error)}</p>` : ''}
     </section>`;
   }
-  const today = state.days[todayStr()], hc = today && today.hcAt;
+  const today = state.days[logicalToday()], hc = today && today.hcAt;
   return `<section class="panel"><h2>Sync between devices</h2>
     <p class="small">Signed in as ${esc(c.email)}.${cloud.busy ? ' Syncing...' : cloud.last ? ` Last synced ${clock(cloud.last)}.` : ''}</p>
     <p class="small">${hc ? `Apple Health data last arrived today at ${clock(hc)}.` : 'No Apple Health data has arrived today yet.'}</p>
@@ -1261,22 +1511,28 @@ function viewEdit() {
   const others = state.habits.filter(x => x.id !== h.id);
   const tiersText = tiersOf(h).length > 1 || h.tiers.length ? tiersOf(h).map(t => `${t.label}, ${t.xp}`).join('\n') : '';
   const days = [1, 2, 3, 4, 5, 6, 7], dayLabel = n => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1];
+  const onSetDays = !!(h.days && h.days.length);
 
   return `<header class="page-head"><h1>${isNew ? 'New habit' : 'Edit habit'}</h1></header>
   <section class="panel form">
     ${field('Name', `<input id="f-name" type="text" value="${esc(h.name)}" maxlength="60">`)}
     ${field('Category', `<select id="f-cat">${CATEGORIES.filter(c => c.id !== 'unsorted' || h.cat === 'unsorted').map(c => opt(c.id, esc(c.name), h.cat)).join('')}</select>`)}
     ${field('How it gets ticked', `<select id="f-type">${Object.entries(TYPES).map(([k, v]) => opt(k, v, h.type)).join('')}</select>`)}
-    ${field('Comes up every (days)', `<input id="f-freq" type="number" min="1" max="60" value="${h.freq}">`)}
-    ${field('Energy needed', `<select id="f-level">${opt(1, 'Low', h.level)}${opt(2, 'Medium', h.level)}${opt(3, 'High', h.level)}</select>`)}
-    ${field('XP (top level)', `<input id="f-xp" type="number" min="1" max="100" value="${h.xp}">`)}
+    ${field('Energy', `<select id="f-level">${opt(1, 'Low', h.level)}${opt(2, 'Medium', h.level)}${opt(3, 'High', h.level)}</select>`)}
+    <div class="field">
+      <span class="lab">How often</span>
+      <div class="freq-toggle">
+        <label class="radiochk"><input type="radio" name="f-freqmode" value="every" data-act="freqmode" ${onSetDays ? '' : 'checked'}> Every X days</label>
+        <label class="radiochk"><input type="radio" name="f-freqmode" value="days" data-act="freqmode" ${onSetDays ? 'checked' : ''}> On set days</label>
+      </div>
+      <div id="freq-every"${onSetDays ? ' hidden' : ''}>${field('Every (days)', `<input id="f-freq" type="number" min="1" max="60" value="${h.freq}">`)}</div>
+      <div id="freq-days"${onSetDays ? '' : ' hidden'}><div class="day-picks">${days.map(n => `<label class="daychk"><input type="checkbox" id="f-day-${n}"${h.days.includes(n) ? ' checked' : ''}>${dayLabel(n)}</label>`).join('')}</div></div>
+    </div>
+    <p class="hint-s">Currently worth ${h.xp} xp — set automatically from energy and frequency (harder or rarer habits earn more). Add custom levels below to override this.</p>
     ${field('Levels, easiest first (optional)', `<textarea id="f-tiers" rows="3" placeholder="Quick brush, 6&#10;Full brush, 10">${esc(tiersText)}</textarea>`, )}
     ${field('Detail choices (separate with commas)', `<input id="f-options" type="text" value="${esc(h.options.join(', '))}" maxlength="200">`)}
     ${field('Only show after', `<select id="f-after">${opt('', 'Nothing, show it any time', h.after)}${others.map(x => opt(x.id, esc(x.name), h.after)).join('')}</select>`)}
     ${field('Tick these too, automatically', `<select id="f-comp" multiple size="5">${others.map(x => `<option value="${x.id}"${h.companions.includes(x.id) ? ' selected' : ''}>${esc(x.name)}</option>`).join('')}</select>`)}
-    <div class="field"><span class="lab">Only on these days (optional)</span>
-      <div class="day-picks">${days.map(n => `<label class="daychk"><input type="checkbox" id="f-day-${n}"${h.days.includes(n) ? ' checked' : ''}>${dayLabel(n)}</label>`).join('')}</div>
-    </div>
     <div class="grid3">
       ${field('From', `<input id="f-time-start" type="time" value="${esc(h.timeStart)}">`)}
       ${field('Until', `<input id="f-time-end" type="time" value="${esc(h.timeEnd)}">`)}
@@ -1311,7 +1567,7 @@ function openOptionsSheet(h, date) {
 
 // The water pop-up: how today's amount is worked out
 function openDataSheet() {
-  const d = state.days[todayStr()] || {};
+  const d = state.days[logicalToday()] || {};
   openSheet(`<h2>Water today</h2>
     <p class="small">${d.hcAt ? `Apple Health synced at ${clock(d.hcAt)}` : ''}</p>
     <div id="water-box"></div>
@@ -1327,7 +1583,7 @@ function openDataSheet() {
 
 function refreshWaterBox() {
   const box = $('#water-box'); if (!box) return;
-  const date = todayStr(), d = state.days[date] || {}, plan = waterPlan(date), have = waterTotal(d), g = CONFIG.glassMl;
+  const date = logicalToday(), d = state.days[date] || {}, plan = waterPlan(date), have = waterTotal(d), g = CONFIG.glassMl;
   box.innerHTML = `<div class="plan">
     <p class="plan-target"><strong>${num(plan.target)} ml</strong> for today</p>
     <ul class="plain parts">${plan.parts.map(p => `<li><span>${p.label}${p.basis ? ` <em>${esc(p.basis)}</em>` : ''}</span><span>${p.add ? (p.ml ? '+' + num(p.ml) + ' ml' : '0') : num(p.ml) + ' ml'}</span></li>`).join('')}</ul>
@@ -1367,7 +1623,7 @@ async function fetchWeather() {
     say('Checking the forecast...');
     const r = await fetch(`https://api.open-meteo.com/v1/forecast?latitude=${s.lat}&longitude=${s.lon}&daily=temperature_2m_max&timezone=auto&forecast_days=1`);
     const t = (await r.json()).daily.temperature_2m_max[0];
-    mutate(() => { const dd = day(todayStr(), true); dd.temp = round1(t); dd.tempOn = todayStr(); });
+    mutate(() => { const dd = day(logicalToday(), true); dd.temp = round1(t); dd.tempOn = logicalToday(); });
     const input = document.querySelector('[data-field="temp"]'); if (input) input.value = round1(t);
     say(`Forecast high ${Math.round(t)}°C`);
   } catch (e) {
@@ -1384,11 +1640,14 @@ function saveHabit() {
     const i = l.lastIndexOf(','); const xp = i >= 0 ? parseInt(l.slice(i + 1), 10) : NaN;
     return { label: (i >= 0 ? l.slice(0, i) : l).trim(), xp: isNaN(xp) ? 10 : Math.max(1, xp) };
   });
-  const days = [1, 2, 3, 4, 5, 6, 7].filter(n => v('f-day-' + n) && v('f-day-' + n).checked);
+  const freqMode = (document.querySelector('input[name="f-freqmode"]:checked') || {}).value || 'every';
+  const onSetDays = freqMode === 'days';
+  const days = onSetDays ? [1, 2, 3, 4, 5, 6, 7].filter(n => v('f-day-' + n) && v('f-day-' + n).checked) : [];
+  const freq = onSetDays ? 1 : Math.max(1, parseInt(v('f-freq').value, 10) || 1);
+  const level = parseInt(v('f-level').value, 10);
   const data = {
     name, cat: v('f-cat').value, type: v('f-type').value,
-    freq: Math.max(1, parseInt(v('f-freq').value, 10) || 1),
-    level: parseInt(v('f-level').value, 10), xp: Math.max(1, parseInt(v('f-xp').value, 10) || 10),
+    freq, level, xp: autoXp(level, freq, onSetDays),
     tiers, gentle: '',
     options: v('f-options').value.split(',').map(x => x.trim()).filter(Boolean),
     after: v('f-after').value,
@@ -1399,7 +1658,7 @@ function saveHabit() {
   };
   if (ui.editId === 'new') state.habits.push({ id: 'h' + Date.now().toString(36), workoutMatch: '', ...data });
   else Object.assign(habitById(ui.editId), data);
-  touchMeta(); syncAuto(todayStr()); save(); ui.editId = null; render(); toast('Saved.');
+  touchMeta(); syncAuto(logicalToday()); save(); ui.editId = null; render(); window.scrollTo(0, ui.returnScroll || 0); toast('Saved.');
 }
 
 async function cloudSignIn() {
@@ -1421,8 +1680,46 @@ document.addEventListener('click', e => {
 
   switch (act) {
     case 'tab': ui.tab = t.dataset.tab; ui.editId = null; ui.addMulti = false; render(); window.scrollTo(0, 0); break;
-    case 'energy': mutate(() => { day(todayStr(), true).energy = t.dataset.val; }); break;
-    case 'plant-add': mutate(() => { const dd = day(todayStr(), true); dd.plants = Math.max(0, (dd.plants || 0) + (parseInt(t.dataset.n, 10) || 0)); }); break;
+    case 'energy': mutate(() => { day(logicalToday(), true).energy = t.dataset.val; }); break;
+    case 'plant-sheet': openPlantSheet(); break;
+    case 'plant-pick':
+      if (t.dataset.val) { mutate(() => { const dd = day(logicalToday(), true); dd.plantsList = dd.plantsList || []; if (!dd.plantsList.some(p => p.toLowerCase() === t.dataset.val.toLowerCase())) dd.plantsList.push(t.dataset.val); }); openPlantSheet(); }
+      break;
+    case 'plant-pick-custom': {
+      const input = $('#f-plant-custom'), val = input && input.value.trim();
+      if (val) { mutate(() => { const dd = day(logicalToday(), true); dd.plantsList = dd.plantsList || []; if (!dd.plantsList.some(p => p.toLowerCase() === val.toLowerCase())) dd.plantsList.push(val); }); openPlantSheet(); }
+      break;
+    }
+    case 'today-sort': ui.todaySort = t.dataset.val; render(); break;
+    case 'skip-today':
+      if (id) { const dd = day(logicalToday(), true); dd.skipped = dd.skipped || {}; dd.skipped[id] = true; save(); render(); toast('Skipped for today.'); }
+      break;
+    case 'unskip-today':
+      if (id) { const dd = day(logicalToday(), true); if (dd.skipped) delete dd.skipped[id]; save(); render(); }
+      break;
+    case 'force-rollover':
+      state.settings.rolloverOverride = todayStr(); touchMeta(); save(); render();
+      break;
+    case 'routine-new':
+      ui.routineEditId = 'new'; ui.routinePickIds = new Set(); openRoutineSheet();
+      break;
+    case 'routine-edit': {
+      const r = state.routines.find(x => x.id === id);
+      if (r) { ui.routineEditId = r.id; ui.routinePickIds = new Set(r.habitIds); openRoutineSheet(); }
+      break;
+    }
+    case 'routine-delete':
+      if (id) { state.routines = state.routines.filter(x => x.id !== id); touchMeta(); save(); render(); toast('Routine deleted.'); }
+      break;
+    case 'routine-save': {
+      const nameEl = $('#f-routine-name'), name = nameEl ? nameEl.value.trim() : '';
+      if (!name) { toast('Give the routine a name.'); break; }
+      const habitIds = [...document.querySelectorAll('[data-habit-pick]:checked')].map(el => el.dataset.habitPick);
+      if (ui.routineEditId === 'new') state.routines.push({ id: 'r' + Date.now().toString(36), name, habitIds });
+      else { const r = state.routines.find(x => x.id === ui.routineEditId); if (r) { r.name = name; r.habitIds = habitIds; } }
+      touchMeta(); save(); ui.routineEditId = null; closeSheet(); render(); toast('Saved.');
+      break;
+    }
     case 'tick': if (h) handleTick(h, parseInt(t.dataset.tier, 10) || 0); break;
     case 'tier-next': ui.tierIdx[id] = (ui.tierIdx[id] || 0) + 1; render(); break;
     case 'open': ui.openId = ui.openId === id ? null : id; render(); break;
@@ -1437,9 +1734,9 @@ document.addEventListener('click', e => {
         if (dd.done[id]) uncompleteHabit(ui.calDetail, id); else { const hh = habitById(id); if (hh) completeHabit(ui.calDetail, hh, 0); }
       });
       break;
-    case 'edit': ui.editId = id; ui.folds.habits = true; render(); window.scrollTo(0, 0); break;
-    case 'new-habit': ui.editId = 'new'; render(); window.scrollTo(0, 0); break;
-    case 'cancel-edit': ui.editId = null; render(); break;
+    case 'edit': ui.returnScroll = window.scrollY; ui.editId = id; ui.folds.habits = true; render(); window.scrollTo(0, 0); break;
+    case 'new-habit': ui.returnScroll = window.scrollY; ui.editId = 'new'; render(); window.scrollTo(0, 0); break;
+    case 'cancel-edit': ui.editId = null; render(); window.scrollTo(0, ui.returnScroll || 0); break;
     case 'save-habit': saveHabit(); break;
     case 'add-multi': ui.addMulti = true; render(); window.scrollTo(0, 0); break;
     case 'cancel-multi': ui.addMulti = false; render(); break;
@@ -1447,12 +1744,32 @@ document.addEventListener('click', e => {
     case 'select-habit':
       if (id) { if (ui.selected.has(id)) ui.selected.delete(id); else ui.selected.add(id); render(); }
       break;
-    case 'bulk-pause': case 'bulk-unpause':
-      if (ui.selected.size) {
-        state.habits.forEach(x => { if (ui.selected.has(x.id)) x.paused = (act === 'bulk-pause'); });
-        touchMeta(); save(); render(); toast(`${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'} ${act === 'bulk-pause' ? 'paused' : 'unpaused'}.`);
+    case 'bulk-toggle-pause': {
+      const sel = state.habits.filter(x => ui.selected.has(x.id));
+      if (sel.length) {
+        const allPaused = sel.every(x => x.paused);
+        sel.forEach(x => x.paused = !allPaused);
+        touchMeta(); save(); render(); toast(allPaused ? `Unpaused ${sel.length}.` : `Paused ${sel.length}.`);
       }
       break;
+    }
+    case 'bulk-toggle-core': {
+      const sel = state.habits.filter(x => ui.selected.has(x.id));
+      if (sel.length) {
+        const allCore = sel.every(x => x.core);
+        sel.forEach(x => x.core = !allCore);
+        touchMeta(); save(); render(); toast(allCore ? `Unmarked ${sel.length} as core.` : `Marked ${sel.length} as core.`);
+      }
+      break;
+    }
+    case 'bulk-freq': {
+      const n = Math.max(1, parseInt((($('#bulk-freq-n') || {}).value), 10) || 0);
+      if (ui.selected.size && n) {
+        state.habits.forEach(x => { if (ui.selected.has(x.id)) { x.freq = n; x.days = []; x.xp = autoXp(x.level, x.freq, false); } });
+        touchMeta(); save(); render(); toast(`Set frequency for ${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'}.`);
+      }
+      break;
+    }
     case 'bulk-delete':
       if (ui.selected.size && confirm(`Delete ${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'}? Your history stays, but they go.`)) {
         const n = ui.selected.size;
@@ -1473,13 +1790,13 @@ document.addEventListener('click', e => {
       if (h && confirm(`Delete "${h.name}"? Your history stays, but the habit goes.`)) {
         state.habits = state.habits.filter(x => x.id !== h.id);
         state.habits.forEach(x => { if (x.after === h.id) x.after = ''; x.companions = x.companions.filter(c => c !== h.id); });
-        touchMeta(); save(); ui.editId = null; render(); toast('Deleted.');
+        touchMeta(); save(); ui.editId = null; render(); window.scrollTo(0, ui.returnScroll || 0); toast('Deleted.');
       }
       break;
-    case 'pick-option': if (h) { const dt = t.dataset.date || todayStr(); closeSheet(); mutate(() => { completeHabit(dt, h, 0, t.dataset.val); }); } break;
+    case 'pick-option': if (h) { const dt = t.dataset.date || logicalToday(); closeSheet(); mutate(() => { completeHabit(dt, h, 0, t.dataset.val); }); } break;
     case 'close-sheet': closeSheet(); break;
     case 'data-sheet': openDataSheet(); break;
-    case 'water-add': mutate(() => { const dd = day(todayStr(), true); dd.waterMl = Math.max(0, (dd.waterMl || 0) + parseInt(t.dataset.ml, 10)); }); break;
+    case 'water-add': mutate(() => { const dd = day(logicalToday(), true); dd.waterMl = Math.max(0, (dd.waterMl || 0) + parseInt(t.dataset.ml, 10)); }); break;
     case 'fetch-weather': fetchWeather(); break;
     case 'pick-starter':
       state.critters[id] = { xp: 0, home: null }; state.buddy = id; touchMeta(); save(); render();
@@ -1533,9 +1850,18 @@ document.addEventListener('change', e => {
       } catch (err) { toast('That file did not look like a Healthy Hub backup.'); }
     };
     reader.readAsText(t.files[0]);
+  } else if (t.dataset.act === 'freqmode') {
+    const everyEl = $('#freq-every'), daysEl = $('#freq-days');
+    if (everyEl && daysEl) { const onDays = t.value === 'days'; everyEl.hidden = onDays; daysEl.hidden = !onDays; }
   } else if (t.dataset.act === 'quick-cat') {
     const h = habitById(t.dataset.id);
     if (h && t.value) { h.cat = t.value; touchMeta(); save(); render(); toast('Moved.'); }
+  } else if (t.dataset.act === 'bulk-level') {
+    if (t.value && ui.selected.size) {
+      const n = ui.selected.size, lvl = parseInt(t.value, 10);
+      state.habits.forEach(x => { if (ui.selected.has(x.id)) { x.level = lvl; x.xp = autoXp(x.level, x.freq, !!(x.days && x.days.length)); } });
+      touchMeta(); save(); render(); toast(`Set energy for ${n} habit${n === 1 ? '' : 's'}.`);
+    }
   } else if (t.dataset.act === 'bulk-cat') {
     if (t.value && ui.selected.size) {
       const n = ui.selected.size;
@@ -1547,10 +1873,10 @@ document.addEventListener('change', e => {
   } else if (t.dataset.field) {
     const f = t.dataset.field;
     mutate(() => {
-      const dd = day(todayStr(), true);
+      const dd = day(logicalToday(), true);
       if (f === 'steps') dd.steps = Math.max(0, parseInt(t.value, 10) || 0);
       if (f === 'hr') dd.hr = Math.max(0, parseInt(t.value, 10) || 0);
-      if (f === 'temp') { dd.temp = t.value === '' ? null : parseFloat(t.value); dd.tempOn = todayStr(); }
+      if (f === 'temp') { dd.temp = t.value === '' ? null : parseFloat(t.value); dd.tempOn = logicalToday(); }
     });
   } else if (t.dataset.setting) {
     const v = parseFloat(t.value);
@@ -1566,10 +1892,10 @@ document.addEventListener('toggle', e => { if (e.target.dataset && e.target.data
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.sheet) closeSheet(); });
 
 // If the app is left open, move on to a new day and catch up with your other devices
-let lastToday = todayStr();
+let lastToday = logicalToday();
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (lastToday !== todayStr()) { lastToday = todayStr(); render(); }
+  if (lastToday !== logicalToday()) { lastToday = logicalToday(); render(); }
   if (cloudReady() && Date.now() - cloud.last > 60000) cloudSync();
   autoWeather();
 });

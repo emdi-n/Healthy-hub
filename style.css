@@ -207,6 +207,23 @@ span.row-name { cursor: default; }
 .mini.wide { font-size: .85rem; }
 .more { grid-column: 1 / -1; padding: 6px 4px 6px 60px; font-size: .92rem; }
 .more .notes { white-space: pre-line; color: var(--ink-soft); }
+.skip-btn { grid-row: 1; width: 32px; height: 32px; padding: 0; font-size: .85rem; color: var(--ink-soft); justify-self: end; }
+.row.dim { opacity: .55; }
+.row.dim .tick { border-color: var(--ink-soft); }
+.goal-mini { display: flex; align-items: center; gap: 8px; margin-top: 10px; font-size: .85rem; color: var(--ink-soft); }
+.goal-mini .ring-mini { width: 28px; height: 28px; }
+.rollover-note { margin-top: 10px; font-size: .82rem; color: var(--ink-soft); display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
+.rollover-note .mini { font-size: .78rem; }
+.routine-card + .routine-card { margin-top: 12px; }
+.routine-picks { max-height: 50vh; overflow-y: auto; margin: 8px 0; }
+.routine-pick { display: flex; align-items: center; gap: 8px; padding: 6px 0; font-size: .92rem; }
+.routine-pick input { width: 18px; height: 18px; }
+.sort-toggle { display: flex; gap: 8px; margin: 2px 0 10px; }
+.sort-toggle .chip { padding: 6px 12px; font-size: .82rem; }
+.sort-toggle .chip.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 600; }
+.cat-group { margin-top: 14px; }
+.cat-group:first-child { margin-top: 0; }
+.cat-subhead { font-size: .85rem; font-weight: 600; color: var(--ink-soft); margin: 0 0 4px; display: flex; align-items: center; gap: 6px; }
 .more audio { width: 100%; margin: 6px 0 10px; }
 
 .fold { margin-bottom: 14px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); padding: 4px 16px; }
@@ -385,6 +402,8 @@ textarea { resize: vertical; }
 .leaf { width: 16px; height: 16px; flex: none; border-radius: 0 70% 0 70%; background: var(--track); border: 1.5px solid var(--line); transition: background .2s ease, border-color .2s ease; }
 .leaf.on { background: var(--c-body); border-color: var(--c-body); }
 .btn[disabled] { opacity: .45; pointer-events: none; }
+.plant-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 2px; }
+.plant-chips .chip.small { padding: 4px 10px; font-size: .78rem; background: var(--bg); }
 
 /* ---------- level tag replacing the old dots ---------- */
 .lvl-tag {
@@ -461,3 +480,6 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 .day-picks { display: flex; flex-wrap: wrap; gap: 8px; }
 .daychk { display: flex; align-items: center; gap: 4px; font-size: .82rem; padding: 6px 10px; border-radius: 99px; border: 1px solid var(--line); }
 .daychk input { accent-color: var(--primary); }
+.freq-toggle { display: flex; gap: 8px; margin: 2px 0 10px; }
+.radiochk { display: flex; align-items: center; gap: 6px; font-size: .88rem; padding: 8px 12px; border-radius: 99px; border: 1px solid var(--line); }
+.radiochk input { accent-color: var(--primary); }
