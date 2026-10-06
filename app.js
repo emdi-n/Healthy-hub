@@ -48,6 +48,7 @@ const CONFIG = {
   buddyBonus: 0.5,     // extra XP your buddy gets when the habit matches their type
   levelBase: 30,       // level L starts at 30 x L x (L-1) xp: 0, 60, 180, 360, 600...
   glassMl: 250,        // size of the "+250" water button
+  coinRate: 0.4,       // coins earned per xp, for the furniture shop
 
   praise: ['Lovely.', 'Nicely done.', 'Good going.', 'Well done.', 'That counts.'],
 };
@@ -73,6 +74,44 @@ const CATEGORIES = [
   { id: 'unsorted', name: 'Unsorted',           emoji: '📥', critter: null },
 ];
 const buddyCategories = () => CATEGORIES.filter(c => c.critter);
+
+// ---- Furniture: unlockable with coins (earned alongside xp), placed inside
+// a critter's home. Shapes are plain inline SVG — no generated images, so
+// there's no ongoing AI/energy cost to the shop changing daily. `svg` is a
+// deliberately simple placeholder; to use your own Inkscape drawings instead,
+// just swap a shape's `svg` string for `<image href="your-file.svg".../>`
+// (exported as a flat-color SVG, it'll still tint correctly via --item-color).
+const FURNITURE_ITEMS = [
+  { id: 'rug',       name: 'Round rug',     cost: 15, svg: '<circle cx="12" cy="12" r="9"/>' },
+  { id: 'cushion',   name: 'Cushion',       cost: 15, svg: '<rect x="4" y="6" width="16" height="12" rx="4"/>' },
+  { id: 'lamp',      name: 'Lantern',       cost: 20, svg: '<path d="M12 3v3M7 9h10l-2 10H9z"/>' },
+  { id: 'shelf',     name: 'Shelf of books', cost: 25, svg: '<rect x="3" y="9" width="18" height="4"/><rect x="5" y="4" width="3" height="5"/><rect x="9" y="4" width="2" height="5"/><rect x="12" y="4" width="3" height="5"/>' },
+  { id: 'plantpot',  name: 'Plant pot',     cost: 20, svg: '<path d="M9 10c0-4 1.5-7 3-7s3 3 3 7" /><path d="M7 10h10l-1.5 11h-7z"/>' },
+  { id: 'hammock',   name: 'Hammock',       cost: 30, svg: '<path d="M4 8v2M20 8v2M4 10c3 4 13 4 16 0"/>' },
+  { id: 'mirror',    name: 'Round mirror',  cost: 25, svg: '<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="5"/>' },
+  { id: 'firepit',   name: 'Fire pit',      cost: 35, svg: '<path d="M12 4c2 4-2 5-1 8a3 3 0 106 0c0-2-1-3-1-5"/>' },
+  { id: 'bunting',   name: 'Bunting',       cost: 15, svg: '<path d="M3 6h18"/><path d="M5 6l3 6 3-6M11 6l3 6 3-6M17 6l2 4"/>' },
+  { id: 'windchime', name: 'Wind chime',    cost: 20, svg: '<path d="M12 3v3"/><path d="M5 6h14"/><path d="M7 6v8M12 6v10M17 6v8"/>' },
+  { id: 'basket',    name: 'Woven basket',  cost: 15, svg: '<path d="M5 10h14l-2 9H7z"/><path d="M8 10a4 3 0 018 0"/>' },
+  { id: 'telescope', name: 'Telescope',     cost: 30, svg: '<path d="M4 16l12-9 2 3-12 9z"/><circle cx="17" cy="8" r="1.5"/>' },
+];
+const furnitureById = id => FURNITURE_ITEMS.find(f => f.id === id);
+// A small deterministic hash so "today's shop" is the same all day (and the
+// same across your devices), but different tomorrow — no server needed.
+function dayHash(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0; return h; }
+function dailyShop(date) {
+  const owned = new Set(state.ownedFurniture || []);
+  const pool = FURNITURE_ITEMS.filter(f => !owned.has(f.id));
+  if (!pool.length) return [];
+  const seed = dayHash(date);
+  const picked = [], used = new Set();
+  for (let i = 0; i < Math.min(3, pool.length); i++) {
+    let idx = (seed + i * 7919) % pool.length, tries = 0;
+    while (used.has(idx) && tries < pool.length) { idx = (idx + 1) % pool.length; tries++; }
+    used.add(idx); picked.push(pool[idx]);
+  }
+  return picked;
+}
 
 const DEFAULT_SETTINGS = {
   stepGoal: 3000, exerciseGoal: 20, standGoal: 6, sleepGoal: 7,   // used by the automatic habits
@@ -123,14 +162,14 @@ const DEFAULT_HABITS = [
 
   // Movement
   H('steps', 'Steps', 'move', { type: 'steps', level: 2, xp: 20 }),
-  H('exercise', 'Exercise time', 'move', { type: 'exercise', level: 2, xp: 20 }),
+  H('exercise', 'Exercise', 'move', { type: 'exercise', level: 2, xp: 20 }),
   H('walk', 'Walk', 'move', { freq: 2, level: 2, xp: 20, gentle: 'Stand at the door and breathe some fresh air',
     workoutMatch: 'walk,walking,hik',
     options: ['Around the house', 'Garden', 'Short local walk', 'Longer walk'] }),
-  H('pt', 'Physio (PT)', 'move', { level: 2, xp: 20, gentle: 'Just one exercise',
+  H('pt', 'PT', 'move', { level: 2, xp: 20, gentle: 'Just one exercise',
     workoutMatch: 'strength,functional,core training,flexibility,cooldown' }),
   H('stretch', 'Stretching', 'move', { gentle: 'One stretch, anywhere' }),
-  H('stand', 'Standing hours', 'move', { type: 'stand' }),
+  H('stand', 'Stand hours', 'move', { type: 'stand' }),
 
   // Water — one tracker, shown as the tree on Today
   H('water', 'Water', 'water', { type: 'water', xp: 20 }),
@@ -181,11 +220,16 @@ function freshState() {
     //                        exerciseMin, standHr, sleepHr, workouts:[{name,ts}], done:{habitId:{xp,mode,detail,cat}}, mt }
     days: {},
     milestones: {},
-    routines: [],                 // [{id, name, habitIds:[]}] — named lists for the Routines tab
+    routines: [],                 // [{id, name, habitIds:[], showOnToday}] — dropdowns shown on Today
+    deletedHabitIds: {},          // {habitId: deletedAtTs} — tombstones so a sync merge can't resurrect a deleted habit
+    deletedRoutineIds: {},        // same, for routines
     buddy: null,                 // category id of your current buddy, e.g. "body"
     critters: {},                // { catId: { xp, home } } — every critter you've obtained
     buddySwapTokens: 0,          // earned at streak milestones, spent when you switch buddy
     mystery: null,                // { pool: [catId, catId, catId] } — a pending mystery unlock
+    coins: 0,                     // spent in the furniture shop, earned alongside xp
+    ownedFurniture: [],           // [itemId] — unlocked furniture, account-wide
+    placedFurniture: {},          // { critterId: [itemId] } — what's currently placed in each home
   };
 }
 
@@ -220,13 +264,18 @@ function migrate(s) {
   }
   s.milestones = s.milestones || {};
   if (!Array.isArray(s.routines)) s.routines = [];
-  s.routines.forEach(r => { if (!Array.isArray(r.habitIds)) r.habitIds = []; });
+  s.routines.forEach(r => { if (!Array.isArray(r.habitIds)) r.habitIds = []; if (r.showOnToday == null) r.showOnToday = true; });
+  s.deletedHabitIds = s.deletedHabitIds || {};
+  s.deletedRoutineIds = s.deletedRoutineIds || {};
   s.startDate = s.startDate || f.startDate;
   s.metaAt = s.metaAt || 0;
   s.buddy = s.buddy || null;
   s.critters = s.critters || {};
   s.buddySwapTokens = s.buddySwapTokens || 0;
   s.mystery = s.mystery || null;
+  s.coins = s.coins || 0;
+  if (!Array.isArray(s.ownedFurniture)) s.ownedFurniture = [];
+  if (!s.placedFurniture || typeof s.placedFurniture !== 'object') s.placedFurniture = {};
   return s;
 }
 
@@ -283,7 +332,13 @@ function logicalToday() {
 }
 const hasSchedule = h => (h.days && h.days.length) || (h.timeStart && h.timeEnd);
 const schedDayOk = h => !(h.days && h.days.length) || h.days.includes(weekdayNow());
-const schedTimeOk = h => { if (!(h.timeStart && h.timeEnd)) return true; const t = timeNow(); return t >= h.timeStart && t <= h.timeEnd; };
+const schedTimeOk = h => {
+  if (!(h.timeStart && h.timeEnd)) return true;
+  const t = timeNow();
+  if (h.timeStart <= h.timeEnd) return t >= h.timeStart && t <= h.timeEnd;
+  // Overnight window (e.g. 20:00-03:00): "in range" means after start OR before end.
+  return t >= h.timeStart || t <= h.timeEnd;
+};
 const inSchedule = h => schedDayOk(h) && schedTimeOk(h);
 const scheduleText = h => {
   const days = h.days && h.days.length ? h.days.map(n => ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][n - 1]).join(', ') : '';
@@ -317,26 +372,31 @@ const dayXp = date => { const d = state.days[date]; return d ? Object.values(d.d
 // so the target rises or falls with how the habits are actually going instead
 // of staying fixed. Needs at least 3 past days at this level before it kicks
 // in (otherwise there isn't enough signal and it just uses the static goal).
-function smartGoal(en) {
+// asOf anchors the lookback to the date being asked about (defaulting to
+// today), not to "right now" — otherwise every past day would keep getting
+// re-graded against today's ever-changing smart goal, shrinking old streaks
+// every time more data comes in.
+function smartGoal(en, asOf) {
   if (en === 'rest') return 0;
   const base = CONFIG.energy[en].goal;
-  const today = logicalToday();
-  const xps = [];
+  const cutoff = asOf || logicalToday();
+  const entries = [];
   for (const date in state.days) {
-    if (date >= today) continue;
+    if (date >= cutoff) continue;
     const dd = state.days[date];
     if (dd && dd.energy === en) {
       const x = dayXp(date);
-      if (x > 0) xps.push(x);
+      if (x > 0) entries.push([date, x]);
     }
   }
-  if (xps.length < 3) return base;
-  const recent = xps.slice(-14);
+  if (entries.length < 3) return base;
+  entries.sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0);
+  const recent = entries.slice(-14).map(e => e[1]);
   const avg = recent.reduce((s, x) => s + x, 0) / recent.length;
   const blended = Math.round(0.6 * avg + 0.4 * base);
   return Math.max(10, blended);
 }
-const goalFor = date => smartGoal(energyOf(date));
+const goalFor = date => smartGoal(energyOf(date), date);
 const goalMet = date => energyOf(date) !== 'rest' && dayXp(date) > 0 && dayXp(date) >= goalFor(date);
 // A day "counts" for streaks if you met your goal or rested on purpose
 const dayOk = date => { const d = state.days[date]; return !!d && (d.energy === 'rest' || goalMet(date)); };
@@ -390,6 +450,10 @@ function levelInfo(xp, base) {
 // ---- Your buddy: the one critter earning XP right now
 const buddyCritter = () => state.buddy ? state.critters[state.buddy] : null;
 function creditBuddy(xp, cat) {
+  // Coins for the furniture shop come out of the same xp, at a fixed rate, so
+  // ticking and unticking stay symmetric (debitBuddy just calls this with the
+  // negated amount) and there's no separate currency to keep in sync.
+  state.coins = Math.max(0, (state.coins || 0) + Math.round(xp * CONFIG.coinRate));
   if (!state.buddy) return;
   const c = state.critters[state.buddy];
   if (!c) return;
@@ -528,14 +592,41 @@ const pick = arr => arr[Math.floor(Math.random() * arr.length)];
 
 // Habits that tick themselves (steps, water, sleep...) are checked here.
 // Only "auto" ticks are ever removed automatically, never ones you did by hand.
+// ---- Continuous goals (steps, standing hours, plants, water, exercise, sleep)
+// don't just flip on at 100% — partway there earns partway XP, and going past
+// the goal earns a bit more. "Halfway" is a token amount so showing up counts
+// for something even on an off day; "Goal met" is the full habit xp, same as
+// before; "Stretch goal" rewards doing noticeably more than asked.
+const CONTINUOUS_MILESTONES = [
+  { frac: 0.5, xpFrac: 0.4, label: 'Halfway there' },
+  { frac: 1, xpFrac: 1, label: 'Goal met' },
+  { frac: 1.5, xpFrac: 1.3, label: 'Stretch goal' },
+];
+function autoMilestone(have, need) {
+  if (!need || !(have > 0)) return null;
+  const pct = have / need;
+  let hit = null;
+  for (const m of CONTINUOUS_MILESTONES) if (pct >= m.frac) hit = m;
+  return hit;
+}
 function syncAuto(date) {
   const d = day(date, true);
   for (const h of activeHabits()) {
     const a = autoInfo(h, date);
     if (!a) continue;
-    const met = a.have > 0 && a.have >= a.need;
-    if (met && !d.done[h.id]) { d.done[h.id] = { xp: h.xp, mode: 'auto', detail: '', cat: h.cat, ts: Date.now() }; creditBuddy(h.xp, h.cat); }
-    if (!met && d.done[h.id] && d.done[h.id].mode === 'auto') { debitBuddy(d.done[h.id].xp, h.cat); delete d.done[h.id]; }
+    const m = autoMilestone(a.have, a.need);
+    const targetXp = m ? Math.max(1, Math.round(h.xp * m.xpFrac)) : 0;
+    const existing = d.done[h.id], wasAuto = existing && existing.mode === 'auto';
+    if (targetXp > 0) {
+      if (!wasAuto || existing.xp !== targetXp) {
+        if (wasAuto) debitBuddy(existing.xp, h.cat);
+        d.done[h.id] = { xp: targetXp, mode: 'auto', detail: m.label, cat: h.cat, ts: Date.now() };
+        creditBuddy(targetXp, h.cat);
+      }
+    } else if (wasAuto) {
+      debitBuddy(existing.xp, h.cat);
+      delete d.done[h.id];
+    }
   }
   // Apple Health workout names can also auto-complete a matching habit (e.g. a walk or strength session)
   if (d.workouts && d.workouts.length) {
@@ -574,21 +665,26 @@ function uncompleteHabit(date, habitId) {
   delete d.done[habitId];
 }
 
-function snapshot() {
-  const d = state.days[ui.date], b = buddyCritter();
-  return { done: d ? Object.keys(d.done) : [], met: goalMet(ui.date), buddyLevel: b ? levelInfo(b.xp, CONFIG.levelBase).level : 0 };
+function snapshot(onDate) {
+  const date = onDate || logicalToday();
+  const d = state.days[date], b = buddyCritter();
+  return { done: d ? Object.keys(d.done) : [], met: goalMet(date), buddyLevel: b ? levelInfo(b.xp, CONFIG.levelBase).level : 0 };
 }
 
 // Run a change, then tidy up: sync auto habits, check milestones, save, redraw and cheer.
-function mutate(fn) {
-  const before = snapshot();
+// `onDate` is the logical day the change applies to — always re-derived fresh
+// (never cached), so a tick made right at the midnight/sleep rollover boundary
+// is graded against the correct day instead of a stale snapshot taken at load time.
+function mutate(fn, onDate) {
+  const date = onDate || logicalToday();
+  const before = snapshot(date);
   fn();
-  syncAuto(ui.date);
-  const after = snapshot();
+  syncAuto(date);
+  const after = snapshot(date);
   const newlyDone = after.done.filter(id => !before.done.includes(id));
   const msgs = [];
   if (newlyDone.length === 1) {
-    const h = habitById(newlyDone[0]), x = state.days[ui.date].done[newlyDone[0]];
+    const h = habitById(newlyDone[0]), x = state.days[date].done[newlyDone[0]];
     if (h) msgs.push(`${pick(CONFIG.praise)} +${x.xp} xp`);
   } else if (newlyDone.length > 1) {
     msgs.push(`${newlyDone.length} habits done`);
@@ -604,10 +700,10 @@ function mutate(fn) {
 }
 
 function handleTick(h, tierIdx, forDate) {
-  const date = forDate || ui.date, d = state.days[date];
-  if (d && d.done[h.id]) return mutate(() => { uncompleteHabit(date, h.id); });
+  const date = forDate || logicalToday(), d = state.days[date];
+  if (d && d.done[h.id]) return mutate(() => { uncompleteHabit(date, h.id); }, date);
   if (h.type === 'check' && h.options.length) return openOptionsSheet(h, date);
-  mutate(() => { completeHabit(date, h, tierIdx || 0); });
+  mutate(() => { completeHabit(date, h, tierIdx || 0); }, date);
 }
 
 // Links like  yoursite/#done=reading&steps=4200  (handy for Shortcuts or NFC tags)
@@ -772,13 +868,65 @@ function mergeDay(local, remote) {
   };
 }
 
+// Union-merge a list of {id,...} records from both sides, keeping an item
+// added on EITHER side (so a habit pasted in on one device isn't silently
+// dropped just because the other device's state looked "newer" overall),
+// preferring the newer side's version of a record where both have it, and
+// dropping anything recorded as deleted in the merged tombstone map.
+function mergeRecordList(baseList, otherList, deletedIds) {
+  const byId = new Map();
+  (otherList || []).forEach(x => byId.set(x.id, x));
+  (baseList || []).forEach(x => byId.set(x.id, x)); // base's version wins on conflict
+  return [...byId.values()].filter(x => !deletedIds[x.id]);
+}
+
 function mergeStates(local, remote) {
   const base = (local.metaAt || 0) >= (remote.metaAt || 0) ? local : remote;
-  const out = { ...base, days: {}, milestones: { ...remote.milestones, ...local.milestones } };
+  const other = base === local ? remote : local;
+  const deletedHabitIds = { ...(local.deletedHabitIds || {}), ...(remote.deletedHabitIds || {}) };
+  const deletedRoutineIds = { ...(local.deletedRoutineIds || {}), ...(remote.deletedRoutineIds || {}) };
+  const out = {
+    ...base,
+    days: {},
+    milestones: { ...remote.milestones, ...local.milestones },
+    habits: mergeRecordList(base.habits, other.habits, deletedHabitIds),
+    routines: mergeRecordList(base.routines, other.routines, deletedRoutineIds),
+    deletedHabitIds, deletedRoutineIds,
+    critters: mergeCritters(local.critters, remote.critters),
+    coins: Math.max(local.coins || 0, remote.coins || 0),
+    ownedFurniture: [...new Set([...(local.ownedFurniture || []), ...(remote.ownedFurniture || [])])],
+    placedFurniture: mergePlacedFurniture(local.placedFurniture, remote.placedFurniture),
+  };
   const dates = new Set([...Object.keys(local.days || {}), ...Object.keys(remote.days || {})]);
   for (const date of dates) out.days[date] = mergeDay(local.days[date], (remote.days || {})[date]);
   out.startDate = [local.startDate, remote.startDate].filter(Boolean).sort()[0];
   return migrate(out);
+}
+
+// Critter XP only ever grows from ticking habits (and shrinks a little on an
+// untick), with no per-change timestamp. Taking the higher xp per critter
+// from either side is a safe way to avoid one device's independent progress
+// being wiped out by a merge, at the small cost of occasionally keeping a
+// stale "home" choice from the richer side.
+function mergeCritters(a, b) {
+  a = a || {}; b = b || {};
+  const ids = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const out = {};
+  ids.forEach(id => {
+    const ca = a[id], cb = b[id];
+    if (ca && cb) out[id] = { ...ca, ...cb, xp: Math.max(ca.xp || 0, cb.xp || 0), home: cb.home ?? ca.home ?? null };
+    else out[id] = ca || cb;
+  });
+  return out;
+}
+// Union each critter's placed-furniture list from both sides, so decorating
+// a room on one device doesn't get undone by a merge from another.
+function mergePlacedFurniture(a, b) {
+  a = a || {}; b = b || {};
+  const ids = new Set([...Object.keys(a), ...Object.keys(b)]);
+  const out = {};
+  ids.forEach(id => { out[id] = [...new Set([...(a[id] || []), ...(b[id] || [])])]; });
+  return out;
 }
 
 // A safety copy of this device's data, taken right before it merges in
@@ -867,6 +1015,7 @@ const ui = {
   tierIdx: {}, addMulti: false, swapPick: null,
   selectMode: false, selected: new Set(), returnScroll: 0, todaySort: 'recommended',
   routineOpen: null, routineEditId: null, routinePickIds: new Set(),
+  homeOpen: null,
 };
 const $ = sel => document.querySelector(sel);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -905,12 +1054,28 @@ function treeSvg(pct) {
     <g clip-path="url(#treeClip)"><rect class="tree-water" x="-2" y="0" width="104" height="132" style="transform:translateY(${y}px)"/></g>
   </svg>`;
 }
+// Same tree, shrunk down to sit in the Auto-tracked grid in place of the water
+// tile's ring — same fill-from-the-bottom idea, just small enough for a tile.
+// Needs its own clipPath id since a page can have more than one on screen (the
+// full-size tree isn't shown anywhere any more, but this keeps both safe to use).
+let miniTreeClipSeq = 0;
+function miniTree(pct) {
+  const p = Math.max(0, Math.min(1, pct)), y = ((1 - p) * 132).toFixed(1);
+  const clipId = `treeClipMini${miniTreeClipSeq++}`;
+  const shapes = '<path d="M50 6 26 46h13L15 82h20L12 116h76L65 82h20L62 46h13z"/><rect x="44" y="116" width="12" height="14" rx="2"/>';
+  return `<svg class="tree-mini" viewBox="0 0 100 132" aria-hidden="true">
+    <defs><clipPath id="${clipId}">${shapes}</clipPath></defs>
+    <g class="tree-line">${shapes}</g>
+    <g class="tree-fill">${shapes}</g>
+    <g clip-path="url(#${clipId})"><rect class="tree-water" x="-2" y="0" width="104" height="132" style="transform:translateY(${y}px)"/></g>
+  </svg>`;
+}
 
 function render() {
-  const views = { today: viewToday, woodland: viewWoodland, calendar: viewCalendar, routines: viewRoutines, settings: viewSettings };
+  const views = { today: viewToday, woodland: viewWoodland, calendar: viewCalendar, settings: viewSettings };
   document.body.dataset.tone = ui.tab === 'today' ? energyOf(logicalToday()) : 'calm';
   $('#app').innerHTML = views[ui.tab]();
-  const tabs = [['today', 'Today'], ['woodland', 'Woodland'], ['calendar', 'Calendar'], ['routines', 'Routines'], ['settings', 'Settings']];
+  const tabs = [['today', 'Today'], ['woodland', 'Woodland'], ['calendar', 'Calendar'], ['settings', 'Settings']];
   $('#nav').innerHTML = tabs.map(([id, label]) =>
     `<button data-act="tab" data-tab="${id}" class="${ui.tab === id ? 'on' : ''}" ${ui.tab === id ? 'aria-current="page"' : ''}>${icon(id)}<span>${label}</span></button>`).join('');
 }
@@ -973,19 +1138,36 @@ function viewToday() {
   const toothTile = toothHabits.length ? (() => {
     const n = toothHabits.filter(x => d && d.done[x.id]).length;
     const pct = n / toothHabits.length;
-    return `<div class="auto-item${n === toothHabits.length ? ' met' : ''}">${miniRing(pct)}<div><p class="auto-name">Teeth</p><p class="small">${n} of ${toothHabits.length}</p></div></div>`;
+    return `<button type="button" class="auto-item tappable${n === toothHabits.length ? ' met' : ''}" data-act="tooth-tap">${miniRing(pct)}<div><p class="auto-name">Toothbrush</p><p class="small">${n} of ${toothHabits.length} — tap to tick</p></div></button>`;
   })() : '';
   const glanceIds = ['shower'];
   const glanceAutos = activeHabits().filter(h => !autoInfo(h, date) && !['teethAM', 'teethPM'].includes(h.id) && (h.workoutMatch || glanceIds.includes(h.id)));
   const autos = [...ringAutos, ...glanceAutos];
-  const autoSection = (autos.length || toothTile) ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${toothTile}${autos.map(h => {
+  const autoTileHtml = h => {
     const a = autoInfo(h, date);
     const doneEntry = d && d.done[h.id];
     const have = a ? a.have : (doneEntry ? 1 : 0), need = a ? a.need : 1, unit = a ? a.unit : '';
     const pct = need ? have / need : 0, met = have >= need && have > 0;
-    const inner = `${miniRing(pct)}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${a ? `${fmtAmount(have)} / ${fmtAmount(need)} ${unit}` : (met ? 'Done' : 'Not yet')}</p></div>`;
+    const milestone = a ? autoMilestone(have, need) : null;
+    const ringEl = h.type === 'water' ? miniTree(pct) : miniRing(pct);
+    const detail = a ? `${fmtAmount(have)} / ${fmtAmount(need)} ${unit}${milestone && milestone.frac > 1 ? ` · ${milestone.label}` : ''}` : (met ? 'Done' : 'Not yet');
+    const inner = `${ringEl}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${detail}</p></div>`;
     return `<div class="auto-item${met ? ' met' : ''}">${inner}</div>`;
-  }).join('')}</div></section>` : '';
+  };
+  // Fixed display order: Water, Sleep, Stand hours, Steps, Exercise, Walk,
+  // PT, Swim, Toothbrush, Shower — anything else (not in this list) still
+  // shows, just tacked on at the end so nothing silently disappears.
+  const AUTO_ORDER = ['water', 'sleep', 'stand', 'steps', 'exercise', 'walk', 'pt', 'nh2_poolswim', 'TEETH', 'shower'];
+  const byId = new Map(autos.map(h => [h.id, h]));
+  const used = new Set();
+  const orderedTiles = [];
+  AUTO_ORDER.forEach(key => {
+    if (key === 'TEETH') { if (toothTile) orderedTiles.push(toothTile); return; }
+    const h = byId.get(key);
+    if (h) { orderedTiles.push(autoTileHtml(h)); used.add(key); }
+  });
+  autos.forEach(h => { if (!used.has(h.id)) orderedTiles.push(autoTileHtml(h)); });
+  const autoSection = orderedTiles.length ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${orderedTiles.join('')}</div></section>` : '';
 
   // Sort remaining (non-auto, non-water, non-plants) habits into groups
   const core = [], picks = [], later = [], notDueYet = [], wrongTimeList = [], wrongDayList = [], done = [], skippedList = [];
@@ -1053,6 +1235,7 @@ function viewToday() {
   else if (!resting) body += `<section class="panel"><p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p></section>`;
   body += fold('more', 'More', more, { skippable: true });
   body += fold('done', 'Done', done);
+  body += todayRoutinesHtml(date);
   if (skippedList.length) {
     const rows = skippedList.map(x => `<li class="row dim" style="--cat:var(--c-${x.h.cat})">
       <span class="row-main"><span class="row-name">${esc(x.h.name)}</span></span>
@@ -1148,6 +1331,7 @@ function rowHtml(h, od, date, opts) {
 function viewWoodland() {
   if (!state.buddy) return viewStarterPick();
   if (state.mystery) return viewMystery();
+  if (ui.homeOpen && state.critters[ui.homeOpen]) return viewCritterHome(ui.homeOpen);
 
   const buddy = state.critters[state.buddy], lvl = levelInfo(buddy.xp, CONFIG.levelBase);
   const buddyCat = catOf(state.buddy);
@@ -1157,11 +1341,11 @@ function viewWoodland() {
     const ownerId = Object.keys(state.critters).find(id => state.critters[id].home === slot);
     if (!ownerId) return `<div class="slot empty">${esc(slot)}<span class="small">Empty</span></div>`;
     const c = catOf(ownerId), cl = levelInfo(state.critters[ownerId].xp, CONFIG.levelBase);
-    return `<div class="slot${ownerId === state.buddy ? ' is-buddy' : ''}">
+    return `<button type="button" class="slot${ownerId === state.buddy ? ' is-buddy' : ''}" data-act="open-home" data-id="${ownerId}">
       <span class="slot-emoji">${c.emoji}</span>
       <span class="slot-name">${esc(c.critter)}</span>
-      <span class="small">${slot} · Lvl ${cl.level}${ownerId === state.buddy ? ' · Buddy' : ' · Resting'}</span>
-    </div>`;
+      <span class="small">${slot} · Lvl ${cl.level}${ownerId === state.buddy ? ' · Buddy' : ' · Resting'} · tap to go inside</span>
+    </button>`;
   }).join('');
 
   const homeless = Object.keys(state.critters).filter(id => !state.critters[id].home);
@@ -1190,7 +1374,55 @@ function viewWoodland() {
     </section>
     ${homelessHtml}
     <h2 class="sec">Your woodland</h2>
-    <div class="slots">${slotsHtml}</div>`;
+    <div class="slots">${slotsHtml}</div>
+    ${shopPanel()}`;
+}
+
+// ---- Furniture shop: 3 items a day, bought with coins earned alongside xp.
+function shopPanel() {
+  const items = dailyShop(logicalToday());
+  const rows = items.length ? items.map(it => `<div class="shop-item">
+      <svg class="shop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
+      <div class="row-main"><span class="row-name">${esc(it.name)}</span><span class="row-meta">${it.cost} coins</span></div>
+      <button class="btn small${state.coins >= it.cost ? ' primary' : ''}" data-act="shop-buy" data-id="${it.id}" ${state.coins >= it.cost ? '' : 'disabled'}>Buy</button>
+    </div>`).join('')
+    : `<p class="empty">You've unlocked everything in the shop — nicely done.</p>`;
+  return `<section class="panel"><h2>Today's shop</h2><p class="small">${num(state.coins)} coins · back tomorrow for 3 new items</p>${rows}</section>`;
+}
+
+// ---- Inside a critter's home: place owned furniture, or send it back to storage.
+function viewCritterHome(critterId) {
+  const c = catOf(critterId), critter = state.critters[critterId];
+  const lvl = levelInfo(critter.xp, CONFIG.levelBase);
+  const placedIds = state.placedFurniture[critterId] || [];
+  const placed = placedIds.map(furnitureById).filter(Boolean);
+  const owned = (state.ownedFurniture || []).map(furnitureById).filter(Boolean);
+  const placedElsewhere = id => Object.entries(state.placedFurniture).some(([cid, ids]) => cid !== critterId && ids.includes(id));
+
+  const roomHtml = placed.length
+    ? placed.map(it => `<button type="button" class="room-item" data-act="toggle-place" data-id="${it.id}" data-critter="${critterId}" aria-label="Put ${esc(it.name)} back in storage">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
+        <span class="small">${esc(it.name)}</span>
+      </button>`).join('')
+    : `<p class="empty">Empty so far — add something from storage below.</p>`;
+
+  const storageHtml = owned.length
+    ? owned.map(it => {
+        const here = placedIds.includes(it.id), elsewhere = !here && placedElsewhere(it.id);
+        return `<button type="button" class="room-item${here ? ' placed' : ''}${elsewhere ? ' dim' : ''}" data-act="toggle-place" data-id="${it.id}" data-critter="${critterId}" ${elsewhere ? 'disabled' : ''} aria-label="${here ? 'Put back in storage' : 'Place in room'}: ${esc(it.name)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
+          <span class="small">${esc(it.name)}${elsewhere ? ' · in another home' : ''}</span>
+        </button>`;
+      }).join('')
+    : `<p class="empty">Nothing unlocked yet — buy something from today's shop on the main Woodland page.</p>`;
+
+  return `<header class="page-head"><button class="mini back" data-act="close-home" aria-label="Back to Woodland">←</button><h1>${esc(c.critter)}'s home</h1></header>
+    <section class="panel buddy-hero" style="--cat:var(--c-${critterId})">
+      <div class="buddy-emoji">${c.emoji}</div>
+      <p class="small">Level ${lvl.level} · ${esc(critter.home || 'no spot chosen yet')}</p>
+    </section>
+    <section class="panel"><h2>Inside</h2><div class="room-grid">${roomHtml}</div></section>
+    <section class="panel"><h2>Storage</h2><p class="small">Tap something to place it, tap again to put it away.</p><div class="room-grid">${storageHtml}</div></section>`;
 }
 
 function viewStarterPick() {
@@ -1304,7 +1536,7 @@ function dayDetail(date) {
   return `<section class="panel day-detail">
     <div class="cal-head"><h2>${prettyDate(date)}</h2><button class="mini pencil" data-act="cal-edit-toggle" aria-label="Edit this day">✎</button></div>
     <div class="pebbles small" role="group">${pebbles}</div>
-    ${en ? `<p class="small">${num(xp)} of ${num(cfg.goal)} xp${goalMet(date) ? ' — goal met' : ''}</p>` : ''}
+    ${en ? `<p class="small">${num(xp)} of ${num(goalFor(date))} xp${goalMet(date) ? ' — goal met' : ''}</p>` : ''}
     ${body}
   </section>`;
 }
@@ -1312,30 +1544,39 @@ function dayDetail(date) {
 // ---------------- ROUTINES — named lists of habits to go through without
 // the rest of Today's noise (e.g. "Morning"). A simple filtered list: no
 // step-through runner, just the habits in that routine, tickable as usual.
-function viewRoutines() {
-  const date = logicalToday();
+// Routines themselves live on the Today tab as dropdown folds (like "More" or
+// "Done"), each skippable for the day same as any other habit; they're added,
+// renamed, deleted and shown/hidden from Settings.
+function todayRoutinesHtml(date) {
+  const visible = state.routines.filter(r => r.showOnToday);
+  if (!visible.length) return '';
+  return visible.map(r => {
+    const habits = r.habitIds.map(habitById).filter(Boolean).filter(h => !h.paused);
+    if (!habits.length) return '';
+    const rows = `<ul class="rows">${habits.map(h => rowHtml(h, null, date, { skippable: true })).join('')}</ul>`;
+    const key = 'routine-' + r.id;
+    return `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${esc(r.name)} <span class="count">${habits.length}</span></summary>${rows}</details>`;
+  }).join('');
+}
+
+// Routines management panel, shown in Settings — add/edit/delete, and a
+// show/hide toggle for whether each one appears as a fold on Today.
+function routinesSettingsPanel() {
   const addBtn = `<button class="btn primary small" data-act="routine-new">Add routine</button>`;
   if (!state.routines.length) {
-    return `<section class="panel"><h2>Routines</h2>
-      <p class="empty">No routines yet. Make one for a set of habits you want to go through together, like a morning or evening wind-down — nothing else from Today will show up in it.</p>
+    return `<section class="panel">
+      <p class="empty">No routines yet. Make one for a set of habits you want to go through together, like a morning or evening wind-down — it'll show up as its own dropdown on Today.</p>
       ${addBtn}</section>`;
   }
-  const cards = state.routines.map(r => {
-    const habits = r.habitIds.map(habitById).filter(Boolean).filter(h => !h.paused);
-    const rows = habits.length
-      ? `<ul class="rows">${habits.map(h => rowHtml(h, null, date, {})).join('')}</ul>`
-      : `<p class="empty">No habits in this routine yet.</p>`;
-    return `<section class="panel routine-card">
-      <div class="cal-head"><h2>${esc(r.name)}</h2>
-        <div class="btn-row">
-          <button class="mini pencil" data-act="routine-edit" data-id="${r.id}" aria-label="Edit ${esc(r.name)}">✎</button>
-          <button class="mini" data-act="routine-delete" data-id="${r.id}" aria-label="Delete ${esc(r.name)}">✕</button>
-        </div>
-      </div>
-      ${rows}
-    </section>`;
-  }).join('');
-  return `<section class="panel"><h2>Routines</h2>${addBtn}</section>${cards}`;
+  const rows = state.routines.map(r => `<li class="row" style="--cat:var(--c-move)">
+    <div class="row-main"><span class="row-name">${esc(r.name)}</span><span class="row-meta">${r.habitIds.length} habit${r.habitIds.length === 1 ? '' : 's'}</span></div>
+    <label class="small" style="display:flex;align-items:center;gap:4px;white-space:nowrap">
+      <input type="checkbox" data-act="routine-toggle-today" data-id="${r.id}"${r.showOnToday ? ' checked' : ''}> On Today
+    </label>
+    <button class="mini pencil" data-act="routine-edit" data-id="${r.id}" aria-label="Edit ${esc(r.name)}">✎</button>
+    <button class="mini" data-act="routine-delete" data-id="${r.id}" aria-label="Delete ${esc(r.name)}">✕</button>
+  </li>`).join('');
+  return `<section class="panel">${addBtn}<ul class="rows">${rows}</ul></section>`;
 }
 
 function openRoutineSheet() {
@@ -1439,6 +1680,11 @@ function viewSettings() {
       ${field('Spare days', `<select data-setting="graceDays">${[0, 1, 2, 3].map(n => opt(n, n === 0 ? 'None' : n + (n === 1 ? ' day' : ' days'), s.graceDays)).join('')}</select>`)}
     </section>
     ${waterCalcPanel()}
+  </details>
+
+  <details class="fold" data-fold="routines-settings"${ui.folds['routines-settings'] ? ' open' : ''}>
+    <summary>Routines <span class="count">${state.routines.length}</span></summary>
+    ${routinesSettingsPanel()}
   </details>
 
   ${cloudPanel()}
@@ -1699,13 +1945,18 @@ document.addEventListener('click', e => {
       break;
     }
     case 'routine-delete':
-      if (id) { state.routines = state.routines.filter(x => x.id !== id); touchMeta(); save(); render(); toast('Routine deleted.'); }
+      if (id) {
+        state.routines = state.routines.filter(x => x.id !== id);
+        state.deletedRoutineIds = state.deletedRoutineIds || {};
+        state.deletedRoutineIds[id] = Date.now();
+        touchMeta(); save(); render(); toast('Routine deleted.');
+      }
       break;
     case 'routine-save': {
       const nameEl = $('#f-routine-name'), name = nameEl ? nameEl.value.trim() : '';
       if (!name) { toast('Give the routine a name.'); break; }
       const habitIds = [...document.querySelectorAll('[data-habit-pick]:checked')].map(el => el.dataset.habitPick);
-      if (ui.routineEditId === 'new') state.routines.push({ id: 'r' + Date.now().toString(36), name, habitIds });
+      if (ui.routineEditId === 'new') state.routines.push({ id: 'r' + Date.now().toString(36), name, habitIds, showOnToday: true });
       else { const r = state.routines.find(x => x.id === ui.routineEditId); if (r) { r.name = name; r.habitIds = habitIds; } }
       touchMeta(); save(); ui.routineEditId = null; closeSheet(); render(); toast('Saved.');
       break;
@@ -1764,6 +2015,8 @@ document.addEventListener('click', e => {
       if (ui.selected.size && confirm(`Delete ${ui.selected.size} habit${ui.selected.size === 1 ? '' : 's'}? Your history stays, but they go.`)) {
         const n = ui.selected.size;
         state.habits = state.habits.filter(x => !ui.selected.has(x.id));
+        state.deletedHabitIds = state.deletedHabitIds || {};
+        ui.selected.forEach(id => { state.deletedHabitIds[id] = Date.now(); });
         ui.selected.clear(); touchMeta(); save(); render(); toast(`Deleted ${n} habit${n === 1 ? '' : 's'}.`);
       }
       break;
@@ -1780,12 +2033,29 @@ document.addEventListener('click', e => {
       if (h && confirm(`Delete "${h.name}"? Your history stays, but the habit goes.`)) {
         state.habits = state.habits.filter(x => x.id !== h.id);
         state.habits.forEach(x => { if (x.after === h.id) x.after = ''; x.companions = x.companions.filter(c => c !== h.id); });
+        state.deletedHabitIds = state.deletedHabitIds || {};
+        state.deletedHabitIds[h.id] = Date.now();
         touchMeta(); save(); ui.editId = null; render(); window.scrollTo(0, ui.returnScroll || 0); toast('Deleted.');
       }
       break;
     case 'pick-option': if (h) { const dt = t.dataset.date || logicalToday(); closeSheet(); mutate(() => { completeHabit(dt, h, 0, t.dataset.val); }); } break;
     case 'close-sheet': closeSheet(); break;
     case 'water-add': mutate(() => { const dd = day(logicalToday(), true); dd.waterMl = Math.max(0, (dd.waterMl || 0) + parseInt(t.dataset.ml, 10)); }); break;
+    case 'tooth-tap': {
+      // One tap per brush: first tap ticks AM (half-filled), second ticks PM
+      // (full), a third tap while both are done resets both back to untick —
+      // handy for undoing a mistaken double-tap.
+      const date = logicalToday(), dd = state.days[date];
+      const amH = habitById('teethAM'), pmH = habitById('teethPM');
+      const amDone = !!(dd && amH && dd.done[amH.id]), pmDone = !!(dd && pmH && dd.done[pmH.id]);
+      if (!amDone && amH) handleTick(amH);
+      else if (amDone && !pmDone && pmH) handleTick(pmH);
+      else {
+        if (amH && amDone) handleTick(amH);
+        if (pmH && pmDone) handleTick(pmH);
+      }
+      break;
+    }
     case 'fetch-weather': fetchWeather(); break;
     case 'pick-starter':
       state.critters[id] = { xp: 0, home: null }; state.buddy = id; touchMeta(); save(); render();
@@ -1806,6 +2076,26 @@ document.addEventListener('click', e => {
     case 'set-home':
       if (id && e.target.value) { state.critters[id].home = e.target.value; touchMeta(); save(); render(); }
       break;
+    case 'open-home': ui.homeOpen = id; render(); window.scrollTo(0, 0); break;
+    case 'close-home': ui.homeOpen = null; render(); break;
+    case 'shop-buy': {
+      const item = furnitureById(id), cost = item ? item.cost : Infinity;
+      if (item && !state.ownedFurniture.includes(id) && state.coins >= cost) {
+        state.coins -= cost;
+        state.ownedFurniture.push(id);
+        touchMeta(); save(); render(); toast(`${item.name} unlocked!`);
+      }
+      break;
+    }
+    case 'toggle-place': {
+      const critterId = t.dataset.critter;
+      if (!critterId || !id) break;
+      const placed = state.placedFurniture[critterId] = state.placedFurniture[critterId] || [];
+      const i = placed.indexOf(id);
+      if (i >= 0) placed.splice(i, 1); else placed.push(id);
+      touchMeta(); save(); render();
+      break;
+    }
     case 'cloud-signin': cloudSignIn(); break;
     case 'cloud-sync': cloudSync(); break;
     case 'cloud-signout': cloud.cfg.session = null; cloudSave(); cloud.error = ''; render(); break;
@@ -1859,6 +2149,9 @@ document.addEventListener('change', e => {
     }
   } else if (t.dataset.act === 'set-home') {
     if (t.dataset.id && t.value) { state.critters[t.dataset.id].home = t.value; touchMeta(); save(); render(); }
+  } else if (t.dataset.act === 'routine-toggle-today') {
+    const r = state.routines.find(x => x.id === t.dataset.id);
+    if (r) { r.showOnToday = t.checked; touchMeta(); save(); render(); }
   } else if (t.dataset.field) {
     const f = t.dataset.field;
     mutate(() => {
@@ -1882,12 +2175,16 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && ui.sheet) 
 
 // If the app is left open, move on to a new day and catch up with your other devices
 let lastToday = logicalToday();
+const checkDayRollover = () => { if (lastToday !== logicalToday()) { lastToday = logicalToday(); render(); } };
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState !== 'visible') return;
-  if (lastToday !== logicalToday()) { lastToday = logicalToday(); render(); }
+  checkDayRollover();
   if (cloudReady() && Date.now() - cloud.last > 60000) cloudSync();
   autoWeather();
 });
+// Catches the rollover even if the tab is left open and focused straight through
+// midnight/4am — visibilitychange alone never fires in that case.
+setInterval(checkDayRollover, 60000);
 
 
 /* ---------------------------------------------------------------------

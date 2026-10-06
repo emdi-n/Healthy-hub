@@ -112,6 +112,7 @@ button:disabled { opacity: .4; cursor: default; }
   margin-bottom: 14px;
 }
 .page-head { padding: 12px 4px 14px; }
+.page-head:has(.back) { display: flex; align-items: center; gap: 10px; }
 .page-head .sub { color: var(--ink-soft); margin-top: 6px; }
 .sec { padding: 8px 4px 8px; }
 .empty { color: var(--ink-soft); margin: 4px 0; }
@@ -388,6 +389,7 @@ textarea { resize: vertical; }
 }
 .water-card:active { transform: scale(.99); }
 .tree { width: 62px; height: 76px; flex: none; }
+.tree-mini { width: 32px; height: 40px; flex: none; }
 .tree-line { fill: none; stroke: var(--ink-soft); stroke-width: 2; opacity: .5; }
 .tree-fill { fill: var(--track); }
 .tree-water { fill: var(--e-water, #6fa8c9); transition: transform .6s ease; }
@@ -436,6 +438,8 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 .auto-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .auto-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 16px; background: var(--bg); }
 .auto-item.met { background: color-mix(in srgb, var(--primary) 14%, var(--bg)); }
+.auto-item.tappable { width: 100%; border: none; text-align: left; font: inherit; color: inherit; cursor: pointer; }
+.auto-item.tappable:active { transform: scale(.98); }
 .ring-mini { width: 36px; height: 36px; flex: none; }
 .ring-mini .ring-bg { fill: none; stroke: var(--track); stroke-width: 4; }
 .ring-mini .ring-fg { fill: none; stroke: var(--primary); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset .4s; }
@@ -466,6 +470,19 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 .slot.is-buddy { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card)); }
 .slot-emoji { font-size: 1.4rem; }
 .slot-name { font-weight: 600; color: var(--ink); }
+button.slot { text-align: left; font: inherit; cursor: pointer; width: 100%; }
+button.slot:active { transform: scale(.98); }
+
+/* ---------- furniture shop + home ---------- */
+.shop-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+.shop-item:first-of-type { border-top: none; }
+.shop-icon { width: 28px; height: 28px; flex: none; color: var(--primary); }
+.room-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 10px; }
+.room-item { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 10px 4px; border-radius: 14px; background: var(--bg); border: 1px solid var(--line); font: inherit; cursor: pointer; color: var(--ink-soft); text-align: center; }
+.room-item svg { width: 26px; height: 26px; color: var(--primary); }
+.room-item.placed { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 14%, var(--bg)); }
+.room-item.dim { opacity: .45; cursor: not-allowed; }
+.mini.back { font-size: 1.1rem; }
 .home-pick { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 8px 0; border-top: 1px solid var(--line); }
 .home-pick:first-child { border-top: 0; }
 
