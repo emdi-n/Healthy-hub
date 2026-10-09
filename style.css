@@ -222,6 +222,11 @@ span.row-name { cursor: default; }
 .sort-toggle { display: flex; gap: 8px; margin: 2px 0 10px; }
 .sort-toggle .chip { padding: 6px 12px; font-size: .82rem; }
 .sort-toggle .chip.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 600; }
+
+.filter-bar { display: flex; gap: 8px; margin: 2px 0 12px; overflow-x: auto; padding-bottom: 2px; -webkit-overflow-scrolling: touch; }
+.filter-bar .chip { padding: 6px 12px; font-size: .82rem; white-space: nowrap; flex: none; }
+.filter-bar .chip.on { background: var(--primary); border-color: var(--primary); color: var(--on-primary); font-weight: 600; }
+.expand-btn { width: 100%; margin-top: 8px; }
 .cat-group { margin-top: 14px; }
 .cat-group:first-child { margin-top: 0; }
 .cat-subhead { font-size: .85rem; font-weight: 600; color: var(--ink-soft); margin: 0 0 4px; display: flex; align-items: center; gap: 6px; }
@@ -269,6 +274,14 @@ span.row-name { cursor: default; }
 .ms li:first-child { border-top: 0; }
 .ms li.got { color: var(--ink); }
 .plain { list-style: none; margin: 0; padding: 0; }
+.routine-settings-list .routine-settings-row {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px;
+  padding: 10px 0; border-top: 1px solid var(--line);
+}
+.routine-settings-list .routine-settings-row:first-child { border-top: 0; }
+.routine-settings-row .row-main { flex: 1 1 140px; min-width: 0; }
+.routine-settings-row .on-today-toggle { display: flex; align-items: center; gap: 4px; white-space: nowrap; }
+.routine-settings-row .btn-row { flex: none; gap: 6px; }
 .sub-h { margin: 14px 0 4px; color: var(--ink-soft); font-family: var(--sans); font-weight: 600; font-size: .9rem; }
 
 /* ---------- calendar ---------- */
@@ -392,7 +405,7 @@ textarea { resize: vertical; }
 .tree-mini { width: 32px; height: 40px; flex: none; }
 .tree-line { fill: none; stroke: var(--ink-soft); stroke-width: 2; opacity: .5; }
 .tree-fill { fill: var(--track); }
-.tree-water { fill: var(--e-water, #6fa8c9); transition: transform .6s ease; }
+.tree-water { fill: var(--cat, var(--e-water, #6fa8c9)); transition: transform .6s ease; }
 :root { --e-water: #6fa8c9; }
 @media (prefers-color-scheme: dark) { :root { --e-water: #7fb8d9; } }
 .wc-text .big { font-size: 1.15rem; }
@@ -400,6 +413,9 @@ textarea { resize: vertical; }
 /* ---------- plant counter ---------- */
 .plant-card { display: flex; flex-direction: column; gap: 10px; text-align: left; }
 .plant-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+.plant-head .small { font-size: 1rem; }
+.plant-head .big { font-size: 1.1rem; }
+.plant-head .xp-bonus { font-size: .8rem; font-weight: 400; color: var(--ink-soft); }
 .leaf-row { display: flex; flex-wrap: wrap; gap: 6px; }
 .leaf { width: 16px; height: 16px; flex: none; border-radius: 0 70% 0 70%; background: var(--track); border: 1.5px solid var(--line); transition: background .2s ease, border-color .2s ease; }
 .leaf.on { background: var(--c-body); border-color: var(--c-body); }
@@ -437,12 +453,12 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 /* ---------- auto-tracked section ---------- */
 .auto-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; }
 .auto-item { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 16px; background: var(--bg); }
-.auto-item.met { background: color-mix(in srgb, var(--primary) 14%, var(--bg)); }
+.auto-item.met { background: color-mix(in srgb, var(--cat, var(--primary)) 14%, var(--bg)); }
 .auto-item.tappable { width: 100%; border: none; text-align: left; font: inherit; color: inherit; cursor: pointer; }
 .auto-item.tappable:active { transform: scale(.98); }
 .ring-mini { width: 36px; height: 36px; flex: none; }
 .ring-mini .ring-bg { fill: none; stroke: var(--track); stroke-width: 4; }
-.ring-mini .ring-fg { fill: none; stroke: var(--primary); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset .4s; }
+.ring-mini .ring-fg { fill: none; stroke: var(--cat, var(--primary)); stroke-width: 4; stroke-linecap: round; transition: stroke-dashoffset .4s; }
 .auto-name { font-size: .85rem; font-weight: 600; margin: 0; }
 
 /* ---------- buddy hero (Woodland) ---------- */
@@ -451,6 +467,14 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 .buddy-hero h2 { margin-bottom: 2px; }
 .buddy-hero .bar { margin: 10px 0 6px; }
 .buddy-hero .btn-row { justify-content: center; margin-top: 12px; }
+.buddy-hero .room-grid { margin-top: 12px; }
+
+/* ---------- Woodland sticky header + top-right icon buttons ---------- */
+.woodland-head { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; justify-content: space-between; gap: 10px; background: var(--bg); padding: 12px 4px 10px; }
+.woodland-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.icon-btn { border: 1px solid var(--line); background: var(--card); border-radius: 999px; padding: 6px 10px; font-size: .95rem; line-height: 1; display: inline-flex; align-items: center; gap: 4px; color: var(--ink); cursor: pointer; }
+.icon-btn:disabled { opacity: .45; cursor: default; }
+.icon-btn.coins { cursor: default; font-weight: 600; }
 
 /* ---------- starter picker ---------- */
 .starters { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 14px; }
@@ -467,7 +491,7 @@ em { font-style: normal; color: var(--primary); font-size: .78em; }
 .slots { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 14px; }
 .slot { padding: 12px; border-radius: 18px; background: var(--card); border: 1px solid var(--line); display: flex; flex-direction: column; gap: 2px; font-size: .85rem; color: var(--ink-soft); }
 .slot.empty { align-items: center; justify-content: center; min-height: 70px; }
-.slot.is-buddy { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card)); }
+.slot.is-buddy { border-color: var(--primary); background: color-mix(in srgb, var(--primary) 12%, var(--card)); cursor: default; }
 .slot-emoji { font-size: 1.4rem; }
 .slot-name { font-weight: 600; color: var(--ink); }
 button.slot { text-align: left; font: inherit; cursor: pointer; width: 100%; }

@@ -112,6 +112,29 @@ function dailyShop(date) {
   }
   return picked;
 }
+// Coins aren't stored as a balance — a mutable number merged from two devices
+// via "pick the bigger one" caused real bugs (spend it on one device, and a
+// sync from another device that hadn't caught up would restore the old,
+// pre-spend amount). Instead the wallet is derived fresh each time from data
+// that already merges correctly on its own: all the xp you've ever earned
+// (days merge additively) minus the cost of everything you've unlocked
+// (ownedFurniture merges as a union) — so it's always consistent, however
+// many devices have been syncing.
+function totalXpEverEarned() {
+  let sum = 0;
+  for (const date in state.days) {
+    const d = state.days[date];
+    if (!d || !d.done) continue;
+    for (const id in d.done) sum += d.done[id].xp || 0;
+  }
+  return sum;
+}
+function furnitureSpent() {
+  return (state.ownedFurniture || []).reduce((s, id) => { const f = furnitureById(id); return s + (f ? f.cost : 0); }, 0);
+}
+function walletCoins() {
+  return Math.max(0, Math.floor(totalXpEverEarned() * CONFIG.coinRate) - furnitureSpent());
+}
 
 const DEFAULT_SETTINGS = {
   stepGoal: 3000, exerciseGoal: 20, standGoal: 6, sleepGoal: 7,   // used by the automatic habits
@@ -227,9 +250,10 @@ function freshState() {
     critters: {},                // { catId: { xp, home } } — every critter you've obtained
     buddySwapTokens: 0,          // earned at streak milestones, spent when you switch buddy
     mystery: null,                // { pool: [catId, catId, catId] } — a pending mystery unlock
-    coins: 0,                     // spent in the furniture shop, earned alongside xp
+    // (coin balance isn't stored — see walletCoins(), derived from xp history + ownedFurniture)
     ownedFurniture: [],           // [itemId] — unlocked furniture, account-wide
     placedFurniture: {},          // { critterId: [itemId] } — what's currently placed in each home
+    customPlants: [],             // plants you've typed in by hand, remembered as quick-pick chips
   };
 }
 
@@ -273,9 +297,10 @@ function migrate(s) {
   s.critters = s.critters || {};
   s.buddySwapTokens = s.buddySwapTokens || 0;
   s.mystery = s.mystery || null;
-  s.coins = s.coins || 0;
+  delete s.coins; // old stored balance, replaced by walletCoins() derived from history
   if (!Array.isArray(s.ownedFurniture)) s.ownedFurniture = [];
   if (!s.placedFurniture || typeof s.placedFurniture !== 'object') s.placedFurniture = {};
+  if (!Array.isArray(s.customPlants)) s.customPlants = [];
   return s;
 }
 
@@ -450,10 +475,6 @@ function levelInfo(xp, base) {
 // ---- Your buddy: the one critter earning XP right now
 const buddyCritter = () => state.buddy ? state.critters[state.buddy] : null;
 function creditBuddy(xp, cat) {
-  // Coins for the furniture shop come out of the same xp, at a fixed rate, so
-  // ticking and unticking stay symmetric (debitBuddy just calls this with the
-  // negated amount) and there's no separate currency to keep in sync.
-  state.coins = Math.max(0, (state.coins || 0) + Math.round(xp * CONFIG.coinRate));
   if (!state.buddy) return;
   const c = state.critters[state.buddy];
   if (!c) return;
@@ -621,11 +642,14 @@ function syncAuto(date) {
       if (!wasAuto || existing.xp !== targetXp) {
         if (wasAuto) debitBuddy(existing.xp, h.cat);
         d.done[h.id] = { xp: targetXp, mode: 'auto', detail: m.label, cat: h.cat, ts: Date.now() };
+        if (d.undone) delete d.undone[h.id];
         creditBuddy(targetXp, h.cat);
       }
     } else if (wasAuto) {
       debitBuddy(existing.xp, h.cat);
       delete d.done[h.id];
+      d.undone = d.undone || {};
+      d.undone[h.id] = Date.now();
     }
   }
   // Apple Health workout names can also auto-complete a matching habit (e.g. a walk or strength session)
@@ -650,6 +674,7 @@ function completeHabit(date, habit, tierIdx, detail, _seen) {
   const tiers = tiersOf(habit), t = tiers[Math.min(tierIdx || 0, tiers.length - 1)];
   const xp = t.xp;
   d.done[habit.id] = { xp, mode: tierIdx ? 'tier' : 'full', detail: detail || (tiers.length > 1 ? t.label : ''), cat: habit.cat, ts: Date.now() };
+  if (d.undone) delete d.undone[habit.id];
   creditBuddy(xp, habit.cat);
   (habit.companions || []).forEach(cid => {
     const ch = habitById(cid);
@@ -663,12 +688,20 @@ function uncompleteHabit(date, habitId) {
   if (!entry) return;
   debitBuddy(entry.xp, entry.cat);
   delete d.done[habitId];
+  // Record *when* this was undone. A plain union-merge of "done" entries can
+  // only add a tick back in, never remove one — so without this, a stale
+  // cloud copy or other device that still has the old tick would resurrect it
+  // a few moments after you untick it, the next time a sync runs. mergeDay
+  // compares this against any done-entry's own timestamp and keeps whichever
+  // action happened more recently.
+  d.undone = d.undone || {};
+  d.undone[habitId] = Date.now();
 }
 
 function snapshot(onDate) {
   const date = onDate || logicalToday();
   const d = state.days[date], b = buddyCritter();
-  return { done: d ? Object.keys(d.done) : [], met: goalMet(date), buddyLevel: b ? levelInfo(b.xp, CONFIG.levelBase).level : 0 };
+  return { done: d ? Object.keys(d.done) : [], met: goalMet(date), buddyLevel: b ? levelInfo(b.xp, CONFIG.levelBase).level : 0, coins: walletCoins() };
 }
 
 // Run a change, then tidy up: sync auto habits, check milestones, save, redraw and cheer.
@@ -682,12 +715,14 @@ function mutate(fn, onDate) {
   syncAuto(date);
   const after = snapshot(date);
   const newlyDone = after.done.filter(id => !before.done.includes(id));
+  const coinGain = after.coins - before.coins;
+  const coinNote = coinGain > 0 ? ` · +${coinGain} 🪙` : '';
   const msgs = [];
   if (newlyDone.length === 1) {
     const h = habitById(newlyDone[0]), x = state.days[date].done[newlyDone[0]];
-    if (h) msgs.push(`${pick(CONFIG.praise)} +${x.xp} xp`);
+    if (h) msgs.push(`${pick(CONFIG.praise)} +${x.xp} xp${coinNote}`);
   } else if (newlyDone.length > 1) {
-    msgs.push(`${newlyDone.length} habits done`);
+    msgs.push(`${newlyDone.length} habits done${coinNote}`);
   }
   if (after.met && !before.met) msgs.push(`Goal met, +${CONFIG.dailyBonusXp} xp`);
   const mm = checkMilestones();
@@ -845,6 +880,14 @@ async function cloudApi(path, opts = {}) {
 // that side's timestamp looks. This is what stops a device that merely
 // opened the app (and so has a "newer" touch on an otherwise-empty day)
 // from silently wiping out habits ticked earlier elsewhere.
+//
+// Ticking is additive like that, but UNTICKING isn't — a plain union of two
+// "done" maps can only ever add an entry back in, never remove one. Without
+// something to mark "this was deliberately undone", a stale cloud copy (or
+// another device that hasn't caught up yet) would resurrect a tick a few
+// moments after you remove it, the next time a sync runs. So each habit id's
+// fate is decided by whichever action — the done entry's own timestamp, or
+// an "undone" tombstone's timestamp — is more recent, on either side.
 function mergeDay(local, remote) {
   if (!local) return remote;
   if (!remote) return local;
@@ -860,12 +903,31 @@ function mergeDay(local, remote) {
     const k = (p || '').trim().toLowerCase();
     if (k && !seenPlant.has(k)) { seenPlant.add(k); plantsList.push(p); }
   });
+  const { done, undone } = mergeDone(older.done, newer.done, older.undone, newer.undone);
   return {
     ...newer,
-    done: { ...older.done, ...newer.done },
+    done, undone,
     skipped: { ...(older.skipped || {}), ...(newer.skipped || {}) },
     workouts, plantsList,
   };
+}
+function mergeDone(doneA, doneB, undoneA, undoneB) {
+  doneA = doneA || {}; doneB = doneB || {}; undoneA = undoneA || {}; undoneB = undoneB || {};
+  const ids = new Set([...Object.keys(doneA), ...Object.keys(doneB), ...Object.keys(undoneA), ...Object.keys(undoneB)]);
+  const done = {}, undone = {};
+  ids.forEach(id => {
+    const candidates = [
+      doneA[id] ? { kind: 'done', entry: doneA[id], ts: doneA[id].ts || 0 } : null,
+      doneB[id] ? { kind: 'done', entry: doneB[id], ts: doneB[id].ts || 0 } : null,
+      undoneA[id] ? { kind: 'undone', ts: undoneA[id] } : null,
+      undoneB[id] ? { kind: 'undone', ts: undoneB[id] } : null,
+    ].filter(Boolean);
+    if (!candidates.length) return;
+    candidates.sort((x, y) => y.ts - x.ts);
+    const win = candidates[0];
+    if (win.kind === 'done') done[id] = win.entry; else undone[id] = win.ts;
+  });
+  return { done, undone };
 }
 
 // Union-merge a list of {id,...} records from both sides, keeping an item
@@ -893,8 +955,8 @@ function mergeStates(local, remote) {
     routines: mergeRecordList(base.routines, other.routines, deletedRoutineIds),
     deletedHabitIds, deletedRoutineIds,
     critters: mergeCritters(local.critters, remote.critters),
-    coins: Math.max(local.coins || 0, remote.coins || 0),
     ownedFurniture: [...new Set([...(local.ownedFurniture || []), ...(remote.ownedFurniture || [])])],
+    customPlants: [...new Set([...(local.customPlants || []), ...(remote.customPlants || [])])],
     placedFurniture: mergePlacedFurniture(local.placedFurniture, remote.placedFurniture),
   };
   const dates = new Set([...Object.keys(local.days || {}), ...Object.keys(remote.days || {})]);
@@ -1013,7 +1075,7 @@ const ui = {
   folds: {}, tab: 'today', date: logicalToday(), openId: null, editId: null, sheet: null,
   calMonth: logicalToday().slice(0, 7), calDetail: null, calEdit: false,
   tierIdx: {}, addMulti: false, swapPick: null,
-  selectMode: false, selected: new Set(), returnScroll: 0, todaySort: 'recommended',
+  selectMode: false, selected: new Set(), returnScroll: 0, todayFilter: 'recommended', todayExpanded: false,
   routineOpen: null, routineEditId: null, routinePickIds: new Set(),
   homeOpen: null,
 };
@@ -1093,7 +1155,15 @@ function safeRender() {
 }
 
 // ---------------- TODAY ----------------
-const greeting = () => { const h = new Date().getHours(); return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening'; };
+// Still "Good evening" at 1am if the day hasn't rolled over yet (no sleep
+// logged, before the fallback hour) -- otherwise midnight logging gets a
+// jarring "Good morning" for a day that, as far as the app's concerned,
+// hasn't started yet.
+const greeting = () => {
+  const h = new Date().getHours();
+  if (logicalToday() !== todayStr()) return 'Good evening';
+  return h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+};
 
 function viewToday() {
   const date = logicalToday(), d = state.days[date];
@@ -1119,7 +1189,7 @@ function viewToday() {
   const hero = `
     <section class="hero">
       <p class="hello"><span>${greeting()}</span><span class="date">${prettyDate(date)}</span></p>
-      <h1 class="q">${chosen ? 'Your energy' : 'How is your energy today?'}</h1>
+      <h1 class="q">${chosen ? 'Today' : 'How is your energy today?'}</h1>
       <div class="pebbles" role="group" aria-label="Energy for the day">${pebbles}</div>
       ${goalLine}
       ${rolloverBanner}
@@ -1138,7 +1208,7 @@ function viewToday() {
   const toothTile = toothHabits.length ? (() => {
     const n = toothHabits.filter(x => d && d.done[x.id]).length;
     const pct = n / toothHabits.length;
-    return `<button type="button" class="auto-item tappable${n === toothHabits.length ? ' met' : ''}" data-act="tooth-tap">${miniRing(pct)}<div><p class="auto-name">Toothbrush</p><p class="small">${n} of ${toothHabits.length} — tap to tick</p></div></button>`;
+    return `<button type="button" class="auto-item tappable${n === toothHabits.length ? ' met' : ''}" style="--cat:var(--c-${toothHabits[0].cat})" data-act="tooth-tap">${miniRing(pct)}<div><p class="auto-name">Toothbrush</p><p class="small">${n} of ${toothHabits.length} — tap to tick</p></div></button>`;
   })() : '';
   const glanceIds = ['shower'];
   const glanceAutos = activeHabits().filter(h => !autoInfo(h, date) && !['teethAM', 'teethPM'].includes(h.id) && (h.workoutMatch || glanceIds.includes(h.id)));
@@ -1152,7 +1222,7 @@ function viewToday() {
     const ringEl = h.type === 'water' ? miniTree(pct) : miniRing(pct);
     const detail = a ? `${fmtAmount(have)} / ${fmtAmount(need)} ${unit}${milestone && milestone.frac > 1 ? ` · ${milestone.label}` : ''}` : (met ? 'Done' : 'Not yet');
     const inner = `${ringEl}<div><p class="auto-name">${esc(h.name)}</p><p class="small">${detail}</p></div>`;
-    return `<div class="auto-item${met ? ' met' : ''}">${inner}</div>`;
+    return `<div class="auto-item${met ? ' met' : ''}" style="--cat:var(--c-${h.cat})">${inner}</div>`;
   };
   // Fixed display order: Water, Sleep, Stand hours, Steps, Exercise, Walk,
   // PT, Swim, Toothbrush, Shower — anything else (not in this list) still
@@ -1167,7 +1237,7 @@ function viewToday() {
     if (h) { orderedTiles.push(autoTileHtml(h)); used.add(key); }
   });
   autos.forEach(h => { if (!used.has(h.id)) orderedTiles.push(autoTileHtml(h)); });
-  const autoSection = orderedTiles.length ? `<section class="panel"><h2>Auto-tracked</h2><div class="auto-grid">${orderedTiles.join('')}</div></section>` : '';
+  const autoSection = orderedTiles.length ? `<section class="panel"><div class="auto-grid">${orderedTiles.join('')}</div></section>` : '';
 
   // Sort remaining (non-auto, non-water, non-plants) habits into groups
   const core = [], picks = [], later = [], notDueYet = [], wrongTimeList = [], wrongDayList = [], done = [], skippedList = [];
@@ -1204,45 +1274,67 @@ function viewToday() {
   const shown = resting ? core : combined.slice(0, cap);
   later.sort((a, b) => b.sortKey - a.sortKey);
   notDueYet.sort((a, b) => b.od.score - a.od.score);
-  const more = resting ? [] : [
-    ...combined.slice(cap),
-    ...later,
+  // Everything due-ish (not done, not skipped): the top-5 "shown" set, plus
+  // the rest of combined and anything blocked only by today's energy level —
+  // all still "due", just not in the first 5. The "+" button on Recommended
+  // (and Categories) reveals these rather than tucking them in a separate fold.
+  const recommendedRest = resting ? [] : [...combined.slice(cap), ...later];
+  // Truly not-due (wrong day/time, or not due yet) plus anything explicitly
+  // skipped today — these make up the Skipped filter: greyed out, but still
+  // tickable or un-skippable from right there.
+  const notDueCombined = [
     ...notDueYet.map(x => ({ ...x, dim: true })),
     ...wrongTimeList.map(x => ({ ...x, dim: true })),
     ...wrongDayList.map(x => ({ ...x, dim: true })),
   ];
 
   const list = (items, opts) => `<ul class="rows">${items.map(x => rowHtml(x.h, x.od, date, { dim: x.dim, skippable: opts && opts.skippable })).join('')}</ul>`;
-  const fold = (key, title, items, opts) => items.length ? `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${title} <span class="count">${items.length}</span></summary>${list(items, opts)}</details>` : '';
+  const expandBtn = (extra) => extra.length
+    ? `<button class="btn small wide expand-btn" data-act="today-expand">${ui.todayExpanded ? 'Show less' : `+ ${extra.length} more`}</button>` : '';
 
-  const sortToggle = !resting && shown.length ? `<div class="sort-toggle" role="group" aria-label="Sort suggested">
-    <button class="chip${ui.todaySort !== 'category' ? ' on' : ''}" data-act="today-sort" data-val="recommended">Recommended</button>
-    <button class="chip${ui.todaySort === 'category' ? ' on' : ''}" data-act="today-sort" data-val="category">By category</button>
-  </div>` : '';
+  const visibleRoutines = state.routines.filter(r => r.showOnToday);
+  const filters = [
+    { id: 'recommended', label: 'Recommended' },
+    { id: 'category', label: 'Categories' },
+    ...visibleRoutines.map(r => ({ id: 'routine-' + r.id, label: r.name })),
+    { id: 'done', label: 'Done' },
+    { id: 'skipped', label: 'Skipped' },
+  ];
+  // A filter picked from a routine/tab that's since been deleted or hidden
+  // falls back to Recommended rather than rendering nothing.
+  if (!filters.some(f => f.id === ui.todayFilter)) ui.todayFilter = 'recommended';
+  const filterBar = `<div class="filter-bar" role="group" aria-label="Filter habits">${filters.map(f =>
+    `<button class="chip${ui.todayFilter === f.id ? ' on' : ''}" data-act="today-filter" data-val="${f.id}">${esc(f.label)}</button>`).join('')}</div>`;
 
-  let suggestedBody;
-  if (ui.todaySort === 'category' && !resting) {
-    suggestedBody = CATEGORIES.map(c => {
-      const items = shown.filter(x => x.h.cat === c.id);
+  let listBody;
+  if (resting) {
+    listBody = shown.length ? list(shown, { skippable: true }) : `<p class="empty">Nothing else needed on a rest day.</p>`;
+  } else if (ui.todayFilter === 'category') {
+    const activeSet = ui.todayExpanded ? [...shown, ...recommendedRest] : shown;
+    const grouped = CATEGORIES.map(c => {
+      const items = activeSet.filter(x => x.h.cat === c.id);
       return items.length ? `<div class="cat-group"><h3 class="cat-subhead"><span aria-hidden="true">${c.emoji}</span> ${esc(c.name)}</h3>${list(items, { skippable: true })}</div>` : '';
     }).join('');
-  } else {
-    suggestedBody = list(shown, { skippable: true });
-  }
-
-  let body = plantCard(date) + autoSection;
-  if (shown.length) body += `<section class="panel"><h2>Suggested</h2>${sortToggle}${suggestedBody}</section>`;
-  else if (!resting) body += `<section class="panel"><p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p></section>`;
-  body += fold('more', 'More', more, { skippable: true });
-  body += fold('done', 'Done', done);
-  body += todayRoutinesHtml(date);
-  if (skippedList.length) {
-    const rows = skippedList.map(x => `<li class="row dim" style="--cat:var(--c-${x.h.cat})">
+    listBody = (activeSet.length ? grouped : `<p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p>`) + expandBtn(recommendedRest);
+  } else if (ui.todayFilter.startsWith('routine-')) {
+    const routine = state.routines.find(r => 'routine-' + r.id === ui.todayFilter);
+    listBody = routine ? routineFilterHtml(routine, date) : '<p class="empty">That routine is gone.</p>';
+  } else if (ui.todayFilter === 'done') {
+    listBody = done.length ? list(done, {}) : '<p class="empty">Nothing done yet today.</p>';
+  } else if (ui.todayFilter === 'skipped') {
+    const skipRows = skippedList.map(x => `<li class="row dim" style="--cat:var(--c-${x.h.cat})">
       <span class="row-main"><span class="row-name">${esc(x.h.name)}</span></span>
       <button class="mini" data-act="unskip-today" data-id="${x.h.id}">Undo</button>
     </li>`).join('');
-    body += `<details class="fold" data-fold="skipped"${ui.folds.skipped ? ' open' : ''}><summary>Skipped today <span class="count">${skippedList.length}</span></summary><ul class="rows">${rows}</ul></details>`;
+    const notDueRows = notDueCombined.length ? list(notDueCombined, { skippable: true }) : '';
+    listBody = (skipRows || notDueRows) ? `<ul class="rows">${skipRows}</ul>${notDueRows}` : '<p class="empty">Nothing skipped today.</p>';
+  } else {
+    listBody = shown.length
+      ? list(shown, { skippable: true }) + expandBtn(recommendedRest) + (ui.todayExpanded ? list(recommendedRest, { skippable: true }) : '')
+      : `<p class="empty">${done.length ? 'Everything suggested is done.' : 'Nothing is due.'}</p>`;
   }
+
+  const body = autoSection + plantCard(date) + `<section class="panel">${filterBar}${listBody}</section>`;
   return hero + body;
 }
 
@@ -1258,20 +1350,23 @@ function plantCard(date) {
   const pct = goal ? Math.min(1, have / goal) : 0;
   const entry = state.days[date] && state.days[date].done[h.id];
   const chips = [...week.values()].map(n => `<span class="chip small">${esc(n)}</span>`).join('');
+  const chipsList = chips
+    ? `<details class="fold" data-fold="plant-chips"${ui.folds['plant-chips'] ? ' open' : ''}><summary>What you've had <span class="count">${week.size}</span></summary><div class="plant-chips">${chips}</div></details>`
+    : '<p class="small">None logged yet this week.</p>';
   return `<section class="panel plant-card">
     <div class="plant-head">
-      <p class="small">Plants this week</p>
-      <p class="big">${have} of ${goal}${entry ? `, +${entry.xp} xp` : ''}</p>
+      <p class="small">Plant points</p>
+      <p class="big">${have} of ${goal}${entry ? `<span class="xp-bonus">, +${entry.xp} xp</span>` : ''}</p>
     </div>
     <div class="bar thin" style="--p:${Math.round(pct * 100)}%"></div>
-    ${chips ? `<div class="plant-chips">${chips}</div>` : '<p class="small">None logged yet this week.</p>'}
+    ${chipsList}
     <button class="btn primary small" data-act="plant-sheet">Add a plant</button>
   </section>`;
 }
 
 function openPlantSheet() {
   const date = logicalToday(), already = weeklyPlants(date);
-  const options = COMMON_PLANTS.filter(p => !already.has(p.toLowerCase()));
+  const options = [...COMMON_PLANTS, ...(state.customPlants || [])].filter(p => !already.has(p.toLowerCase()));
   openSheet(`<h2>Add a plant</h2>
     <p class="small">Fruit, veg, grains, nuts, pulses, herbs — anything plant-based you've had today.</p>
     ${options.length ? `<div class="chips">${options.map(p => `<button class="chip" data-act="plant-pick" data-val="${esc(p)}">${esc(p)}</button>`).join('')}</div>` : ''}
@@ -1331,7 +1426,7 @@ function rowHtml(h, od, date, opts) {
 function viewWoodland() {
   if (!state.buddy) return viewStarterPick();
   if (state.mystery) return viewMystery();
-  if (ui.homeOpen && state.critters[ui.homeOpen]) return viewCritterHome(ui.homeOpen);
+  if (ui.homeOpen && state.critters[ui.homeOpen] && ui.homeOpen !== state.buddy) return viewCritterHome(ui.homeOpen);
 
   const buddy = state.critters[state.buddy], lvl = levelInfo(buddy.xp, CONFIG.levelBase);
   const buddyCat = catOf(state.buddy);
@@ -1340,11 +1435,19 @@ function viewWoodland() {
   const slotsHtml = SLOTS.map(slot => {
     const ownerId = Object.keys(state.critters).find(id => state.critters[id].home === slot);
     if (!ownerId) return `<div class="slot empty">${esc(slot)}<span class="small">Empty</span></div>`;
-    const c = catOf(ownerId), cl = levelInfo(state.critters[ownerId].xp, CONFIG.levelBase);
-    return `<button type="button" class="slot${ownerId === state.buddy ? ' is-buddy' : ''}" data-act="open-home" data-id="${ownerId}">
+    const c = catOf(ownerId), cl = levelInfo(state.critters[ownerId].xp, CONFIG.levelBase), isBuddy = ownerId === state.buddy;
+    const meta = `${slot} · Lvl ${cl.level}${isBuddy ? ' · Buddy' : ' · Resting · tap to go inside'}`;
+    if (isBuddy) {
+      return `<div class="slot is-buddy">
+        <span class="slot-emoji">${c.emoji}</span>
+        <span class="slot-name">${esc(c.critter)}</span>
+        <span class="small">${meta}</span>
+      </div>`;
+    }
+    return `<button type="button" class="slot" data-act="open-home" data-id="${ownerId}">
       <span class="slot-emoji">${c.emoji}</span>
       <span class="slot-name">${esc(c.critter)}</span>
-      <span class="small">${slot} · Lvl ${cl.level}${ownerId === state.buddy ? ' · Buddy' : ' · Resting'} · tap to go inside</span>
+      <span class="small">${meta}</span>
     </button>`;
   }).join('');
 
@@ -1358,19 +1461,32 @@ function viewWoodland() {
     }).join('')}
   </section>` : '';
 
-  const swapHtml = others.length ? `<div class="btn-row">
-    <button class="btn${state.buddySwapTokens > 0 ? ' primary' : ''}" data-act="open-swap" ${state.buddySwapTokens > 0 ? '' : 'disabled'}>Switch buddy</button>
-    <span class="small">${state.buddySwapTokens} swap${state.buddySwapTokens === 1 ? '' : 's'} available</span>
-  </div>` : '';
+  const canSwap = others.length > 0 && state.buddySwapTokens > 0;
+  const placedIds = state.placedFurniture[state.buddy] || [];
+  const placed = placedIds.map(furnitureById).filter(Boolean);
+  const roomHtml = placed.length
+    ? placed.map(it => `<button type="button" class="room-item" data-act="toggle-place" data-id="${it.id}" data-critter="${state.buddy}" aria-label="Put ${esc(it.name)} back in storage">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
+        <span class="small">${esc(it.name)}</span>
+      </button>`).join('')
+    : `<p class="empty">Empty so far — add something from storage.</p>`;
 
-  return `<header class="page-head"><h1>Woodland</h1></header>
+  return `<header class="page-head woodland-head">
+      <h1>Woodland</h1>
+      <div class="woodland-actions">
+        <button type="button" class="icon-btn" data-act="open-storage" aria-label="Storage">📦</button>
+        <button type="button" class="icon-btn" data-act="open-swap" aria-label="Switch buddy" ${canSwap ? '' : 'disabled'}>🔁</button>
+        <span class="icon-btn coins" aria-hidden="true">💰 ${walletCoins()}</span>
+      </div>
+    </header>
     <section class="panel buddy-hero" style="--cat:var(--c-${state.buddy})">
       <div class="buddy-emoji">${buddyCat.emoji}</div>
       <h2>${esc(buddyCat.critter)}</h2>
-      <p class="small">Level ${lvl.level} · your buddy</p>
+      <p class="small">Level ${lvl.level} · ${esc(buddyCat.name)}</p>
       <div class="bar" style="--p:${Math.round(lvl.pct * 100)}%" aria-hidden="true"></div>
-      <p class="small">${num(lvl.span - lvl.into)} xp to level ${lvl.level + 1} · extra xp from ${esc(catOf(state.buddy).name)} habits</p>
-      ${swapHtml}
+      <p class="small">${num(lvl.span - lvl.into)} xp to level ${lvl.level + 1}</p>
+      <p class="small">${esc(buddy.home || 'No home chosen yet')}</p>
+      <div class="room-grid">${roomHtml}</div>
     </section>
     ${homelessHtml}
     <h2 class="sec">Your woodland</h2>
@@ -1384,10 +1500,10 @@ function shopPanel() {
   const rows = items.length ? items.map(it => `<div class="shop-item">
       <svg class="shop-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
       <div class="row-main"><span class="row-name">${esc(it.name)}</span><span class="row-meta">${it.cost} coins</span></div>
-      <button class="btn small${state.coins >= it.cost ? ' primary' : ''}" data-act="shop-buy" data-id="${it.id}" ${state.coins >= it.cost ? '' : 'disabled'}>Buy</button>
+      <button class="btn small${walletCoins() >= it.cost ? ' primary' : ''}" data-act="shop-buy" data-id="${it.id}" ${walletCoins() >= it.cost ? '' : 'disabled'}>Buy</button>
     </div>`).join('')
     : `<p class="empty">You've unlocked everything in the shop — nicely done.</p>`;
-  return `<section class="panel"><h2>Today's shop</h2><p class="small">${num(state.coins)} coins · back tomorrow for 3 new items</p>${rows}</section>`;
+  return `<section class="panel"><h2>Shop</h2><p class="small">Refreshes daily</p>${rows}</section>`;
 }
 
 // ---- Inside a critter's home: place owned furniture, or send it back to storage.
@@ -1456,10 +1572,31 @@ function viewMystery() {
 
 function swapSheet() {
   const others = Object.keys(state.critters).filter(id => id !== state.buddy);
-  openSheet(`<h2>Switch buddy</h2><p class="small">Uses one of your ${state.buddySwapTokens} swaps.</p>
+  openSheet(`<h2>Switch buddy? (${state.buddySwapTokens} remaining)</h2>
     <div class="chips">${others.map(id => `<button class="chip" data-act="do-swap" data-id="${id}">${catOf(id).emoji} ${esc(catOf(id).critter)}</button>`).join('')}</div>
     <button class="btn" data-act="close-sheet">Cancel</button>`, 'swap');
 }
+
+// ---- Storage: everything owned, placeable into the buddy's own home. (Other
+// critters' storage still lives on their own viewCritterHome page.)
+function storageSheetHtml() {
+  const critterId = state.buddy;
+  const placedIds = state.placedFurniture[critterId] || [];
+  const owned = (state.ownedFurniture || []).map(furnitureById).filter(Boolean);
+  const placedElsewhere = id => Object.entries(state.placedFurniture).some(([cid, ids]) => cid !== critterId && ids.includes(id));
+  const html = owned.length
+    ? owned.map(it => {
+        const here = placedIds.includes(it.id), elsewhere = !here && placedElsewhere(it.id);
+        return `<button type="button" class="room-item${here ? ' placed' : ''}${elsewhere ? ' dim' : ''}" data-act="toggle-place" data-id="${it.id}" data-critter="${critterId}" ${elsewhere ? 'disabled' : ''} aria-label="${here ? 'Put back in storage' : 'Place in room'}: ${esc(it.name)}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${it.svg}</svg>
+          <span class="small">${esc(it.name)}${elsewhere ? ' · in another home' : ''}</span>
+        </button>`;
+      }).join('')
+    : `<p class="empty">Nothing unlocked yet — buy something from today's shop.</p>`;
+  return `<h2>Storage</h2><p class="small">Tap something to place it, tap again to put it away.</p><div class="room-grid">${html}</div>
+    <button class="btn" data-act="close-sheet">Close</button>`;
+}
+function storageSheet() { openSheet(storageSheetHtml(), 'storage'); }
 
 // ---------------- CALENDAR ----------------
 function viewCalendar() {
@@ -1544,19 +1681,14 @@ function dayDetail(date) {
 // ---------------- ROUTINES — named lists of habits to go through without
 // the rest of Today's noise (e.g. "Morning"). A simple filtered list: no
 // step-through runner, just the habits in that routine, tickable as usual.
-// Routines themselves live on the Today tab as dropdown folds (like "More" or
-// "Done"), each skippable for the day same as any other habit; they're added,
-// renamed, deleted and shown/hidden from Settings.
-function todayRoutinesHtml(date) {
-  const visible = state.routines.filter(r => r.showOnToday);
-  if (!visible.length) return '';
-  return visible.map(r => {
-    const habits = r.habitIds.map(habitById).filter(Boolean).filter(h => !h.paused);
-    if (!habits.length) return '';
-    const rows = `<ul class="rows">${habits.map(h => rowHtml(h, null, date, { skippable: true })).join('')}</ul>`;
-    const key = 'routine-' + r.id;
-    return `<details class="fold" data-fold="${key}"${ui.folds[key] ? ' open' : ''}><summary>${esc(r.name)} <span class="count">${habits.length}</span></summary>${rows}</details>`;
-  }).join('');
+// Each visible routine (toggled in Settings) is one of Today's filter tabs;
+// completing or skipping a habit there drops it out of the routine's own
+// view too — it's still reachable, just under Done or Skipped instead.
+function routineFilterHtml(routine, date) {
+  const d = state.days[date], skipped = (d && d.skipped) || {};
+  const habits = routine.habitIds.map(habitById).filter(h => h && !h.paused && !(d && d.done[h.id]) && !skipped[h.id]);
+  if (!habits.length) return '<p class="empty">Nothing left in this routine for today.</p>';
+  return `<ul class="rows">${habits.map(h => rowHtml(h, null, date, { skippable: true })).join('')}</ul>`;
 }
 
 // Routines management panel, shown in Settings — add/edit/delete, and a
@@ -1568,15 +1700,17 @@ function routinesSettingsPanel() {
       <p class="empty">No routines yet. Make one for a set of habits you want to go through together, like a morning or evening wind-down — it'll show up as its own dropdown on Today.</p>
       ${addBtn}</section>`;
   }
-  const rows = state.routines.map(r => `<li class="row" style="--cat:var(--c-move)">
+  const rows = state.routines.map(r => `<li class="routine-settings-row">
     <div class="row-main"><span class="row-name">${esc(r.name)}</span><span class="row-meta">${r.habitIds.length} habit${r.habitIds.length === 1 ? '' : 's'}</span></div>
-    <label class="small" style="display:flex;align-items:center;gap:4px;white-space:nowrap">
+    <label class="small on-today-toggle">
       <input type="checkbox" data-act="routine-toggle-today" data-id="${r.id}"${r.showOnToday ? ' checked' : ''}> On Today
     </label>
-    <button class="mini pencil" data-act="routine-edit" data-id="${r.id}" aria-label="Edit ${esc(r.name)}">✎</button>
-    <button class="mini" data-act="routine-delete" data-id="${r.id}" aria-label="Delete ${esc(r.name)}">✕</button>
+    <div class="btn-row">
+      <button class="mini pencil" data-act="routine-edit" data-id="${r.id}" aria-label="Edit ${esc(r.name)}">✎</button>
+      <button class="mini" data-act="routine-delete" data-id="${r.id}" aria-label="Delete ${esc(r.name)}">✕</button>
+    </div>
   </li>`).join('');
-  return `<section class="panel">${addBtn}<ul class="rows">${rows}</ul></section>`;
+  return `<section class="panel">${addBtn}<ul class="plain routine-settings-list">${rows}</ul></section>`;
 }
 
 function openRoutineSheet() {
@@ -1923,10 +2057,18 @@ document.addEventListener('click', e => {
       break;
     case 'plant-pick-custom': {
       const input = $('#f-plant-custom'), val = input && input.value.trim();
-      if (val) { mutate(() => { const dd = day(logicalToday(), true); dd.plantsList = dd.plantsList || []; if (!dd.plantsList.some(p => p.toLowerCase() === val.toLowerCase())) dd.plantsList.push(val); }); openPlantSheet(); }
+      if (val) {
+        mutate(() => { const dd = day(logicalToday(), true); dd.plantsList = dd.plantsList || []; if (!dd.plantsList.some(p => p.toLowerCase() === val.toLowerCase())) dd.plantsList.push(val); });
+        // Remember it so it shows up as a quick-pick chip next time too.
+        state.customPlants = state.customPlants || [];
+        const known = [...COMMON_PLANTS, ...state.customPlants].some(p => p.toLowerCase() === val.toLowerCase());
+        if (!known) { state.customPlants.push(val); save(); }
+        openPlantSheet();
+      }
       break;
     }
-    case 'today-sort': ui.todaySort = t.dataset.val; render(); break;
+    case 'today-filter': ui.todayFilter = t.dataset.val; ui.todayExpanded = false; render(); break;
+    case 'today-expand': ui.todayExpanded = !ui.todayExpanded; render(); break;
     case 'skip-today':
       if (id) { const dd = day(logicalToday(), true); dd.skipped = dd.skipped || {}; dd.skipped[id] = true; save(); render(); toast('Skipped for today.'); }
       break;
@@ -2078,10 +2220,10 @@ document.addEventListener('click', e => {
       break;
     case 'open-home': ui.homeOpen = id; render(); window.scrollTo(0, 0); break;
     case 'close-home': ui.homeOpen = null; render(); break;
+    case 'open-storage': storageSheet(); break;
     case 'shop-buy': {
       const item = furnitureById(id), cost = item ? item.cost : Infinity;
-      if (item && !state.ownedFurniture.includes(id) && state.coins >= cost) {
-        state.coins -= cost;
+      if (item && !state.ownedFurniture.includes(id) && walletCoins() >= cost) {
         state.ownedFurniture.push(id);
         touchMeta(); save(); render(); toast(`${item.name} unlocked!`);
       }
@@ -2094,6 +2236,7 @@ document.addEventListener('click', e => {
       const i = placed.indexOf(id);
       if (i >= 0) placed.splice(i, 1); else placed.push(id);
       touchMeta(); save(); render();
+      if (ui.sheet === 'storage') { $('#sheet .sheet-card').innerHTML = storageSheetHtml(); }
       break;
     }
     case 'cloud-signin': cloudSignIn(); break;
